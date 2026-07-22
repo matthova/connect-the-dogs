@@ -184,7 +184,7 @@ function resetGame() {
   G.heat = 0;
   G.dogsLost = 0; G.won = false;
   G.everTiered = false; G.fedOnce = false; G.firstBird = false;
-  G.frenzyT = 0; G.frenzyCd = 0; G.dreadT = 0;
+  G.frenzyT = 0; G.frenzyCd = 0; G.dreadT = 0; G.fBeat = 0; G.frenzyTaps = 0;
   G.timers = [];
   G.birdTimer = 12; G.sqTimer = 10;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
@@ -452,6 +452,7 @@ function pileY() { return 92; }
 // ---------- frenzy ----------
 function startFrenzy() {
   G.frenzyT = 5;
+  G.fBeat = 0; G.frenzyTaps = 0;
   bank();
   sfx.bell();
   addText(W / 2, H * 0.45, '🔔 FEEDING FRENZY! TAP TAP TAP!', '#ffd700', 28);
@@ -994,6 +995,14 @@ function tapAt(x, y) {
   return false;
 }
 function frenzyFire() {
+  G.frenzyTaps++;
+  tone(1800, 0.03, 'square', 0.04);
+  if (G.frenzyTaps === 10 || G.frenzyTaps === 20 || G.frenzyTaps === 30) {
+    const words = { 10: '×10 RAMPAGE!', 20: '×20 UNREAL!', 30: '×30 GODLIKE!' };
+    G.score += 500;
+    addText(W / 2, H * 0.5, words[G.frenzyTaps] + ' +500', '#ffd700', 26);
+    confetti(pouchPos().x, pouchPos().y - 60, 20);
+  }
   const cands = feedables();
   if (!cands.length) {
     // nothing left to feed — still reward the taps so the banner never lies
@@ -1078,9 +1087,15 @@ function update(dt) {
   G.timers = G.timers.filter(tm => tm.t > 0);
   due.forEach(tm => tm.fn());
 
-  // frenzy
+  // frenzy — the whole yard bounces on the 132 BPM beat
   if (G.frenzyT > 0) {
     G.frenzyT -= dt;
+    const prevBeat = G.fBeat;
+    G.fBeat += dt * 2.2;
+    if (Math.floor(G.fBeat) > Math.floor(prevBeat)) {
+      for (const d of G.dogs) if (!d.leaving) d.hopT = Math.max(d.hopT, 0.15);
+      tone(220, 0.07, 'square', 0.045);
+    }
     if (G.frenzyT <= 0) endFrenzy();
   }
   if (G.dreadT > 0) G.dreadT -= dt;
@@ -1146,7 +1161,11 @@ function draw() {
   drawParticles();
   drawHUD();
 
-  if (G.frenzyT > 0) { cx.fillStyle = 'rgba(255,215,0,0.10)'; cx.fillRect(-20, -20, W + 40, H + 40); }
+  if (G.frenzyT > 0) {
+    const pulse = 0.06 + 0.10 * (1 - (G.fBeat % 1));
+    cx.fillStyle = `rgba(255,215,0,${pulse.toFixed(3)})`;
+    cx.fillRect(-20, -20, W + 40, H + 40);
+  }
   // greed vignette — gold pressure closes in with the pile
   if (G.state === 'play' && G.unbanked > 800) {
     const va = clamp(G.unbanked / 6000, 0, 0.18);
