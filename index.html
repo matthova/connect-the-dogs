@@ -300,6 +300,7 @@ function tierUp(d) {
   const hp = headPos(d);
   d.flashT = 0.4;
   G.everTiered = true;
+  pow(hp.x, hp.y - 34, 'CHOMP!', TIER_COLORS[d.tier]);
   ringBurst(hp.x, hp.y, TIER_COLORS[d.tier]);
   confetti(hp.x, hp.y, 14);
   sfx.bark(d.tier);
@@ -531,6 +532,7 @@ function spawnBird(force) {
 function koBird(b, byTreat) {
   b.state = 'ko'; b.koT = 1.2;
   sfx.boing(); noise(0.1, 0.1, 1500);
+  pow(b.x, b.y, 'POW!', '#e74c3c');
   burst(b.x, b.y, 8, b.magpie ? '#dddddd' : '#7fb3d5', 2.5, 'feather');
   if (b.carrying) { // stolen loot rains back down
     const t = b.carrying; b.carrying = null;
@@ -647,7 +649,7 @@ function bonkSquirrel(s, byTreat) {
   if (s.hp > 1) {
     s.hp--; s.staggerT = 0.5;
     sfx.thud();
-    addText(s.x, s.y - 24, 'TOUGH!', '#ffaa44', 14);
+    pow(s.x, s.y - 10, 'THUNK!', '#aa7744', true);
     burst(s.x, s.y, 4, '#ffee88', 2, 'star');
     return;
   }
@@ -665,6 +667,7 @@ function bonkSquirrel(s, byTreat) {
   }
   s.state = 'ko'; s.koT = 0.8;
   sfx.boing();
+  pow(s.x, s.y - 6, 'BONK!', '#e67e22');
   burst(s.x, s.y, 8, '#ffee88', 2.5, 'star');
   shake(3);
   if (byTreat) {
@@ -773,6 +776,11 @@ function confetti(x, y, n) {
 }
 function addText(x, y, str, color, size) {
   G.texts.push({ x: clamp(x, 70, W - 70), y, str, color, size, t: 1.1, max: 1.1 });
+}
+function pow(x, y, word, color, small) {
+  const pows = G.parts.filter(p => p.kind === 'pow');
+  if (pows.length >= 3) G.parts.splice(G.parts.indexOf(pows[0]), 1);
+  G.parts.push({ x, y, word, color, kind: 'pow', t: 0.5, max: 0.5, rot: rand(-0.25, 0.25), size: small ? 0.7 : 1 });
 }
 function shake(m) { G.shake = Math.max(G.shake, m); }
 function hitstop(s) { G.hitstop = Math.max(G.hitstop, s); }
@@ -928,7 +936,7 @@ function frame(now) {
   G.texts = G.texts.filter(t => t.t > 0);
   for (const p of G.parts) {
     p.t -= rdt;
-    if (p.kind !== 'ring') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + 500 * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
+    if (p.kind !== 'ring' && p.kind !== 'pow') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + 500 * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
   }
   G.parts = G.parts.filter(p => p.t > 0);
   for (const c of G.coins) {
@@ -1382,6 +1390,25 @@ function drawParticles() {
     if (p.kind === 'ring') {
       cx.strokeStyle = p.color; cx.lineWidth = 4 * a;
       cx.beginPath(); cx.arc(p.x, p.y, p.size + (1 - a) * 90, 0, TAU); cx.stroke();
+    } else if (p.kind === 'pow') {
+      // comic starburst with the word punched in
+      cx.save();
+      cx.translate(p.x, p.y); cx.rotate(p.rot);
+      const pop = (1 + 0.5 * Math.sin(Math.min(1, (1 - a) * 3) * Math.PI * 0.5)) * p.size;
+      cx.beginPath();
+      for (let i = 0; i < 20; i++) {
+        const r = (i % 2 === 0 ? 44 : 26) * pop;
+        const ang = i / 20 * TAU;
+        const xx = Math.cos(ang) * r * 1.25, yy = Math.sin(ang) * r * 0.8;
+        if (i === 0) cx.moveTo(xx, yy); else cx.lineTo(xx, yy);
+      }
+      cx.closePath();
+      cx.fillStyle = '#fff'; cx.fill();
+      cx.strokeStyle = '#111'; cx.lineWidth = 3; cx.stroke();
+      cx.font = `bold ${Math.round(19 * pop)}px sans-serif`; cx.textAlign = 'center'; cx.textBaseline = 'middle';
+      cx.fillStyle = p.color; cx.fillText(p.word, 0, 1);
+      cx.restore();
+      cx.textBaseline = 'alphabetic';
     } else if (p.kind === 'confetti') {
       cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot);
       cx.fillStyle = p.color; cx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
