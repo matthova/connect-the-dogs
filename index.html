@@ -209,6 +209,15 @@ G.best = +((store && store.getItem('chompchain_best')) || 0);
 const todayStr = new Date().toLocaleDateString('en-CA');
 G.dayBest = ((store && store.getItem('cc_dayBestDate')) === todayStr) ? +(store.getItem('cc_dayBest') || 0) : 0;
 G.bestChainEver = +((store && store.getItem('cc_bestChain')) || 0);
+G.lifetime = +((store && store.getItem('cc_lifetime')) || 0);
+const COATS = [
+  { c: '#f5f5f5', at: 25000, name: 'DALMATIAN' },
+  { c: '#708090', at: 75000, name: 'HUSKY' },
+  { c: '#e6b820', at: 150000, name: 'GOLDEN' },
+  { c: '#2c3e50', at: 300000, name: 'MIDNIGHT' },
+];
+const BASE_COATS = ['#c68642', '#8d6748', '#e8d5b7', '#6b6b6b', '#a0522d'];
+let hotStreak = 0; // session-only: consecutive fast rematches
 resetGame();
 
 // ---------- dogs ----------
@@ -227,7 +236,7 @@ function spawnDog(slotIdx, walkIn) {
     blinkT: rand(1, 4), hopT: 0, wagPhase: rand(0, TAU),
     walkIn: walkIn ? 1 : 0, leaving: false, leaveX: 0,
     flashT: 0, sadT: 0, deflateT: 0,
-    breed: pick(['#c68642', '#8d6748', '#e8d5b7', '#6b6b6b', '#a0522d']),
+    breed: pick(BASE_COATS.concat(COATS.filter(c => G.lifetime >= c.at).map(c => c.c))),
   };
   if (walkIn) { d.x = d.fx < 0.5 ? -60 : W + 60; }
   G.dogs.push(d);
@@ -1135,7 +1144,14 @@ cv.addEventListener('pointerdown', e => {
 
   if (G.state === 'title') { G.state = 'play'; return; }
   if (G.state === 'over') {
-    if (G.gameOverT > 0.8) { resetGame(); G.state = 'play'; }
+    if (G.gameOverT > 0.8) {
+      hotStreak = G.gameOverT < 6.8 ? Math.min(hotStreak + 1, 2) : 0;
+      resetGame(); G.state = 'play';
+      if (hotStreak > 0) {
+        G.chainStep = hotStreak; // start at ×2 / ×3
+        addText(W / 2, H * 0.5, '🔥 HOT STREAK ' + hotStreak + ' — STARTING CHAIN ×' + CHAIN_STEPS[G.chainStep], '#ff8844', 20);
+      }
+    }
     return;
   }
 
@@ -1282,6 +1298,18 @@ function gameOver() {
     G.dayBest = G.score;
     if (store) try { store.setItem('cc_dayBest', G.dayBest); store.setItem('cc_dayBestDate', todayStr); } catch (e) {}
   }
+  // letter grade vs the record you walked in with
+  G.grade = G.runStartBest <= 0 ? 'B' :
+    (G.score >= G.runStartBest && G.score >= 8000) ? 'S' :
+    G.score >= 0.8 * G.runStartBest ? 'A' :
+    G.score >= 0.5 * G.runStartBest ? 'B' : 'C';
+  G.gradeStamped = false; G.goTickStep = -1;
+  // lifetime total — every run feeds the coat unlocks, even the bad ones
+  const lifeBefore = G.lifetime;
+  G.lifetime += G.score;
+  if (store) try { store.setItem('cc_lifetime', G.lifetime); } catch (e) {}
+  const newCoat = COATS.find(c => lifeBefore < c.at && G.lifetime >= c.at);
+  G.coatMsg = newCoat ? '🐕 NEW COAT UNLOCKED: ' + newCoat.name + '!' : null;
 }
 
 // ---------- update ----------
@@ -1297,7 +1325,13 @@ function frame(now) {
   const dt = rdt * G.timeScale;
 
   if (G.state === 'play') update(dt);
-  if (G.state === 'over') G.gameOverT += rdt;
+  if (G.state === 'over') {
+    G.gameOverT += rdt;
+    const cnt = clamp((G.gameOverT - 0.3) / 1.2, 0, 1);
+    const stp = Math.floor(cnt * 14);
+    if (stp !== G.goTickStep) { G.goTickStep = stp; if (cnt > 0 && cnt < 1) sfx.tick(); }
+    if (cnt >= 1 && !G.gradeStamped) { G.gradeStamped = true; sfx.woof(); shake(4); }
+  }
 
   // visuals tick on real time
   G.shake = Math.max(0, G.shake - rdt * 26);
@@ -1593,6 +1627,14 @@ function drawDog(d) {
   // body
   cx.fillStyle = d.breed;
   cx.beginPath(); cx.ellipse(x, y, 38 * s, 26 * s, 0, 0, TAU); cx.fill();
+  // dalmatian spots
+  if (d.breed === '#f5f5f5') {
+    cx.fillStyle = '#3a3a3a';
+    for (const [ox, oy, r] of [[-14, -6, 4.5], [10, 4, 5], [20, -8, 3.5], [-4, 9, 3.5]]) {
+      cx.beginPath(); cx.arc(x + ox * s, y + oy * s, r * s, 0, TAU); cx.fill();
+    }
+    cx.fillStyle = d.breed;
+  }
   // legs
   cx.fillRect(x - 26 * s, y + 10 * s, 9 * s, 16 * s);
   cx.fillRect(x + 17 * s, y + 10 * s, 9 * s, 16 * s);
@@ -2118,6 +2160,24 @@ function drawTitle() {
     cx.font = '15px sans-serif'; cx.fillStyle = '#ffd700';
     cx.fillText('BEST: ' + fmt(G.best) + (G.dayBest > 0 && G.dayBest < G.best ? '   ·   TODAY: ' + fmt(G.dayBest) : '') + (G.bestChainEver >= 4 ? '   ·   CHAIN PB ×' + G.bestChainEver : ''), W / 2, H * 0.85);
   }
+  // coat shelf — unlocked swatches in color, next target labeled
+  const shelfY = H * 0.905;
+  const allCoats = BASE_COATS.map(c => ({ c, at: 0 })).concat(COATS);
+  const gap2 = 26, x0 = W / 2 - (allCoats.length - 1) * gap2 / 2;
+  allCoats.forEach((co, i) => {
+    const unlocked = G.lifetime >= co.at;
+    cx.beginPath(); cx.arc(x0 + i * gap2, shelfY, 8, 0, TAU);
+    cx.fillStyle = unlocked ? co.c : 'rgba(20,40,20,0.9)';
+    cx.fill();
+    cx.strokeStyle = unlocked ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.15)';
+    cx.lineWidth = 1.5; cx.stroke();
+    if (!unlocked) { cx.font = '9px sans-serif'; cx.fillStyle = '#688868'; cx.textAlign = 'center'; cx.fillText('🔒', x0 + i * gap2, shelfY + 3); }
+  });
+  const nextCoat = COATS.find(c => G.lifetime < c.at);
+  cx.font = '12px sans-serif'; cx.fillStyle = '#8fd18f'; cx.textAlign = 'center';
+  cx.fillText(nextCoat
+    ? 'NEXT COAT: ' + nextCoat.name + ' at ' + fmt(nextCoat.at) + ' lifetime 🪙 (' + fmt(G.lifetime) + ' so far)'
+    : 'ALL COATS UNLOCKED — ' + fmt(G.lifetime) + ' lifetime 🪙', W / 2, shelfY + 26);
 }
 
 function drawGameOver() {
@@ -2129,8 +2189,33 @@ function drawGameOver() {
   cx.fillStyle = '#ffd700';
   cx.fillText(G.won ? '🏆 YARD MASTERED! 🏆' : 'YARD OVERRUN!', W / 2, H * 0.2);
 
+  // animated tally + grade stamp
+  const cnt = clamp((G.gameOverT - 0.3) / 1.2, 0, 1);
   cx.font = 'bold 30px sans-serif'; cx.fillStyle = '#fff';
-  cx.fillText('BANKED  ' + fmt(G.score), W / 2, H * 0.3);
+  cx.fillText('BANKED  ' + fmt(G.score * cnt), W / 2, H * 0.3);
+  if (G.gradeStamped) {
+    const gk = clamp((G.gameOverT - 1.5) / 0.25, 0, 1);
+    const gs = 3 - 2 * gk;
+    const gx = Math.min(W / 2 + 190, W - 56), gy = H * 0.29;
+    const gcol = { S: '#ffd700', A: '#2ecc71', B: '#3498db', C: '#95a5a6' }[G.grade];
+    cx.save();
+    cx.translate(gx, gy); cx.scale(gs, gs); cx.globalAlpha = gk;
+    cx.beginPath(); cx.arc(0, 0, 26, 0, TAU);
+    cx.fillStyle = 'rgba(0,0,0,0.4)'; cx.fill();
+    cx.strokeStyle = gcol; cx.lineWidth = 3; cx.stroke();
+    cx.fillStyle = gcol; cx.font = 'bold 32px sans-serif';
+    cx.fillText(G.grade, 0, 12);
+    cx.restore();
+    if (G.grade !== 'S' && G.runStartBest > 0) {
+      cx.font = '13px sans-serif'; cx.fillStyle = '#aaa';
+      const target = Math.max(8000, G.runStartBest);
+      cx.fillText('S rank at ' + fmt(target) + ' — you were ' + fmt(Math.max(0, target - G.score)) + ' away', W / 2, H * 0.52);
+    }
+  }
+  if (G.coatMsg) {
+    cx.font = 'bold 18px sans-serif'; cx.fillStyle = '#ffb8f8';
+    cx.fillText(G.coatMsg, W / 2, H * 0.555);
+  }
   cx.font = '17px sans-serif'; cx.fillStyle = '#cfe8cf';
   cx.fillText('Best Chain  ×' + G.bestChain + '      Spiked Collars  ' + G.spikedCount + (G.runCloseCalls ? '      Close Calls  ' + G.runCloseCalls : ''), W / 2, H * 0.36);
   if (G.biggestPileLost > 0) {
@@ -2188,6 +2273,14 @@ function drawGameOver() {
     cx.fill();
     cx.fillStyle = '#fff'; cx.font = `bold ${Math.round(26 * pulse)}px sans-serif`;
     cx.fillText('PLAY AGAIN', W / 2, H * 0.78 + 9);
+    // decaying rematch offer
+    if (G.gameOverT < 6.8) {
+      const rk = 1 - (G.gameOverT - 0.8) / 6;
+      cx.fillStyle = 'rgba(0,0,0,0.4)'; cx.fillRect(W / 2 - 100, H * 0.78 + 44, 200, 6);
+      cx.fillStyle = '#ff8844'; cx.fillRect(W / 2 - 100, H * 0.78 + 44, 200 * rk, 6);
+      cx.font = 'bold 13px sans-serif'; cx.fillStyle = '#ffaa66';
+      cx.fillText('🔥 REMATCH NOW: start at chain ×' + CHAIN_STEPS[Math.min(hotStreak + 1, 2)], W / 2, H * 0.78 + 68);
+    }
   }
 }
 
