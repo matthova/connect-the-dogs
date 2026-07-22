@@ -150,6 +150,7 @@ function resetGame() {
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
   G.pileJit = 0; G.flashT = 0; G.flashCol = null;
   G.pouchKick = 0;
+  G.dispScore = 0; G.dispUnbanked = 0; G.tickCd = 0;
   G.closeCallCd = 0; G.runCloseCalls = 0; G.snapStreak = 0;
   G.gameOverT = 0; G.graduates = [];
   // starting roster: near + both mid slots (far row unlocks as you play)
@@ -1012,6 +1013,13 @@ function frame(now) {
   }
   G.coins = G.coins.filter(c => c.t > 0);
 
+  // rolling number displays — gains roll upward with ticks, losses snap
+  G.dispScore = Math.abs(G.score - G.dispScore) < 2 ? G.score : lerp(G.dispScore, G.score, 1 - Math.pow(0.02, rdt));
+  if (G.unbanked < G.dispUnbanked) G.dispUnbanked = G.unbanked;
+  else G.dispUnbanked = Math.abs(G.unbanked - G.dispUnbanked) < 2 ? G.unbanked : lerp(G.dispUnbanked, G.unbanked, 1 - Math.pow(0.01, rdt));
+  if (G.tickCd > 0) G.tickCd -= rdt;
+  if (G.state === 'play' && G.score - G.dispScore > 2 && G.tickCd <= 0) { sfx.tick(); G.tickCd = 0.06; }
+
   draw();
 }
 function update(dt) {
@@ -1515,12 +1523,18 @@ function drawParticles() {
 function drawHUD() {
   if (G.state === 'title') return;
   cx.save();
-  // score
+  // score — rolls up with a punch while counting
+  const scoreDiff = G.score - G.dispScore;
+  const spin = scoreDiff > 2;
+  cx.save();
+  cx.translate(20, 42);
+  cx.scale(1 + Math.min(0.25, scoreDiff / 3000), 1 + Math.min(0.25, scoreDiff / 3000));
   cx.font = 'bold 26px sans-serif'; cx.textAlign = 'left';
   cx.strokeStyle = 'rgba(0,0,0,0.5)'; cx.lineWidth = 4;
-  cx.strokeText('🪙 ' + fmt(G.score), 20, 42);
-  cx.fillStyle = '#fff';
-  cx.fillText('🪙 ' + fmt(G.score), 20, 42);
+  cx.strokeText('🪙 ' + fmt(G.dispScore), 0, 0);
+  cx.fillStyle = spin ? '#ffd700' : '#fff';
+  cx.fillText('🪙 ' + fmt(G.dispScore), 0, 0);
+  cx.restore();
 
   // unbanked pile — jitters harder as it grows
   if (G.unbanked > 0) {
@@ -1533,7 +1547,7 @@ function drawHUD() {
     }
     cx.font = 'bold 17px sans-serif';
     cx.strokeStyle = 'rgba(0,0,0,0.5)'; cx.lineWidth = 3;
-    const label = '+' + fmt(G.unbanked) + '  ×' + CHAIN_STEPS[G.chainStep];
+    const label = '+' + fmt(G.dispUnbanked) + '  ×' + CHAIN_STEPS[G.chainStep];
     cx.strokeText(label, pileX() + 26 + jx, pileY() + 4 + jy);
     cx.fillStyle = '#ffe28a';
     cx.fillText(label, pileX() + 26 + jx, pileY() + 4 + jy);
