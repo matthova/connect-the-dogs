@@ -192,6 +192,7 @@ function resetGame() {
   G.bonkCount = 0;
   G.shield = false; G.tierUps = 0; G.shieldsUsed = 0;
   G.dareT = 0; G.dareUsed = false;
+  G.bestBeaten = false; G.dayBeaten = false; G.runStartBest = G.best || 0;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
@@ -205,6 +206,9 @@ function resetGame() {
   spawnDog(6); spawnDog(3); spawnDog(4);
 }
 G.best = +((store && store.getItem('chompchain_best')) || 0);
+const todayStr = new Date().toLocaleDateString('en-CA');
+G.dayBest = ((store && store.getItem('cc_dayBestDate')) === todayStr) ? +(store.getItem('cc_dayBest') || 0) : 0;
+G.bestChainEver = +((store && store.getItem('cc_bestChain')) || 0);
 resetGame();
 
 // ---------- dogs ----------
@@ -478,6 +482,17 @@ function chainUp() {
     G.chainStep++;
     sfx.pop(G.chainStep);
     G.bestChain = Math.max(G.bestChain, CHAIN_STEPS[G.chainStep]);
+    const mult = CHAIN_STEPS[G.chainStep];
+    if (mult > G.bestChainEver) {
+      const wasReal = G.bestChainEver >= 5;
+      G.bestChainEver = mult;
+      if (store) try { store.setItem('cc_bestChain', mult); } catch (e) {}
+      if (wasReal) {
+        addText(W / 2, H * 0.3, 'RECORD CHAIN ×' + mult + '!', '#ff88ff', 30);
+        ringBurst(W / 2, H * 0.3, '#ff88ff');
+        sfx.pop(4); sfx.pop(5); sfx.pop(6);
+      }
+    }
     const word = CHAIN_WORDS[G.chainStep];
     if (word) addText(W / 2, H * 0.35, word + '  ×' + CHAIN_STEPS[G.chainStep], '#ffd700', 18 + G.chainStep * 4);
     if (G.chainStep === CHAIN_STEPS.length - 1) startFrenzy();
@@ -1263,6 +1278,10 @@ function gameOver() {
     G.best = G.score;
     if (store) try { store.setItem('chompchain_best', G.best); } catch (e) {}
   }
+  if (G.score > G.dayBest) {
+    G.dayBest = G.score;
+    if (store) try { store.setItem('cc_dayBest', G.dayBest); store.setItem('cc_dayBestDate', todayStr); } catch (e) {}
+  }
 }
 
 // ---------- update ----------
@@ -1412,6 +1431,18 @@ function update(dt) {
       if (G.unbanked > 2000) tone(clamp(300 + G.unbanked / 20, 300, 900), 0.3, 'sine', 0.022);
     }
   } else G.beatAcc = 0;
+
+  // live record crossings — the fist-pump happens DURING the run, not after
+  if (!G.bestBeaten && G.runStartBest > 300 && G.score > G.runStartBest) {
+    G.bestBeaten = true;
+    addText(W / 2, H * 0.35, '★ NEW BEST! KEEP GOING! ★', '#ffd700', 32);
+    confetti(W / 2, H * 0.35, 30);
+    sfx.bell(); flash('#ffd70022'); shake(5); G.slowT = 0.3;
+  } else if (!G.dayBeaten && !G.bestBeaten && G.dayBest > 300 && G.score > G.dayBest) {
+    G.dayBeaten = true;
+    addText(W / 2, H * 0.32, "☀ TODAY'S BEST!", '#ffe28a', 24);
+    for (let i = 0; i < 6; i++) sfx.coin(i);
+  }
 
   for (const d of [...G.dogs]) updateDog(d, dt);
   for (const t of [...G.treats]) updateTreat(t, dt);
@@ -1981,7 +2012,23 @@ function drawHUD() {
   cx.fillText('🪙 ' + fmt(G.dispScore), 0, 0);
   cx.restore();
 
-  // unbanked pile — jitters harder as it grows
+  // progress bar toward your record — a live carrot under the score
+  if (G.runStartBest > 0) {
+    const bw2 = 120;
+    cx.fillStyle = 'rgba(0,0,0,0.35)'; cx.fillRect(20, 52, bw2, 5);
+    if (G.bestBeaten) {
+      const sweep = (performance.now() / 1500) % 1;
+      cx.fillStyle = '#ffd700'; cx.fillRect(20, 52, bw2, 5);
+      cx.fillStyle = 'rgba(255,255,255,0.6)';
+      cx.fillRect(20 + sweep * (bw2 - 24), 52, 24, 5);
+    } else {
+      cx.fillStyle = '#ffd700';
+      cx.fillRect(20, 52, bw2 * clamp(G.score / G.runStartBest, 0, 1), 5);
+    }
+    cx.font = '11px sans-serif'; cx.textAlign = 'left';
+    cx.fillStyle = G.bestBeaten ? '#ffd700' : 'rgba(255,255,255,0.75)';
+    cx.fillText(G.bestBeaten ? '★ BEST +' + fmt(G.score - G.runStartBest) : '★ ' + fmt(G.runStartBest), 20 + bw2 + 6, 58);
+  }
   if (G.unbanked > 0) {
     const jit = (G.pileJit > 0 ? 3 : 1) * Math.min(4, G.unbanked / 800);
     const jx = rand(-jit, jit), jy = rand(-jit, jit);
@@ -2069,7 +2116,7 @@ function drawTitle() {
   cx.fillText('TAP TO START', W / 2, H * 0.78);
   if (G.best > 0) {
     cx.font = '15px sans-serif'; cx.fillStyle = '#ffd700';
-    cx.fillText('BEST: ' + fmt(G.best), W / 2, H * 0.85);
+    cx.fillText('BEST: ' + fmt(G.best) + (G.dayBest > 0 && G.dayBest < G.best ? '   ·   TODAY: ' + fmt(G.dayBest) : '') + (G.bestChainEver >= 4 ? '   ·   CHAIN PB ×' + G.bestChainEver : ''), W / 2, H * 0.85);
   }
 }
 
@@ -2092,7 +2139,7 @@ function drawGameOver() {
   }
   if (G.score >= G.best && G.score > 0) {
     cx.fillStyle = '#ffd700'; cx.font = 'bold 19px sans-serif';
-    cx.fillText('★ NEW BEST! ★', W / 2, H * 0.475);
+    cx.fillText('★ NEW BEST! ★' + (G.runStartBest > 0 ? '  beat it by +' + fmt(G.score - G.runStartBest) : ''), W / 2, H * 0.475);
   } else if (G.best > 0) {
     cx.fillStyle = '#aaa'; cx.fillText('Best: ' + fmt(G.best), W / 2, H * 0.475);
   }
