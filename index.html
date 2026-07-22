@@ -463,13 +463,16 @@ function updateTreat(t, dt) {
           if (t.closeCalled && !t.isAcorn) closeCallBonus(t, hp);
           if (!t.isAcorn && G.t - d.openedAt < 0.22) snapCatch(d, hp);
           else if (!t.isAcorn) G.snapStreak = 0;
+          if (t.assistFrom && t.assistFrom !== d && G.dogs.indexOf(t.assistFrom) >= 0) alleyOop(t.assistFrom, d, hp);
           feedDog(d, t.isAcorn);
           removeTreat(t);
         } else if (t.vy > -50) {
-          // bonk off closed snout
-          t.vy = -Math.abs(t.vy) * 0.4; t.vx *= 0.5;
+          // bonk off closed snout — a real deflection that can set up another dog
+          t.vx = (t.x < d.x ? -1 : 1) * rand(180, 320);
+          t.vy = -rand(420, 600);
           t.groundY = d.y + 26;
           t.bounced = true;
+          t.assistFrom = d;
           sfx.tick();
           burst(t.x, t.y, 3, '#ffffff', 1.5);
         }
@@ -534,6 +537,18 @@ function snapCatch(d, hp) {
     const p = pouchPos(), T = 0.45;
     launchTreat(p.x, p.y - 20, (hp.x - p.x) / T, (hp.y - (p.y - 20)) / T - 0.5 * GRAV * T, false);
   }
+}
+// a treat bounced off one dog's closed snout into another dog's open mouth
+function alleyOop(assist, catcher, hp) {
+  chainUp();
+  const bonus = 150 * CHAIN_STEPS[G.chainStep];
+  if (G.frenzyT > 0) G.score += bonus; else G.unbanked += bonus;
+  assist.hunger = Math.min(1, assist.hunger + 0.15);
+  pow(hp.x, hp.y - 40, 'ALLEY-OOP!', '#a29bfe');
+  confetti(assist.x, assist.y - 40, 8);
+  confetti(catcher.x, catcher.y - 40, 8);
+  addText(hp.x, hp.y - 70, '+' + fmt(bonus), '#a29bfe', 18);
+  sfx.bark(1);
 }
 function inAnyAura(x, y) {
   return G.dogs.some(d => d.guardian && dist(x, y, d.x, d.y) < AURA_R);
