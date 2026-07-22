@@ -216,7 +216,7 @@ function spawnDog(slotIdx, walkIn) {
     mouthOpen: true, mouthT: rand(0.2, 0.8),
     taunted: false, freeOpenT: 0, openedAt: -9,
     fetchCd: 0, fetching: null,
-    guardian: false, auraA: 0,
+    guardian: false, auraA: 0, barkCd: 0,
     blinkT: rand(1, 4), hopT: 0, wagPhase: rand(0, TAU),
     walkIn: walkIn ? 1 : 0, leaving: false, leaveX: 0,
     flashT: 0, sadT: 0, deflateT: 0,
@@ -270,7 +270,11 @@ function updateDog(d, dt) {
   }
   d.x = d.fx * W; d.y = d.fy * H;
 
-  if (d.guardian) { d.auraA = Math.min(1, d.auraA + dt * 2); return; }
+  if (d.guardian) {
+    d.auraA = Math.min(1, d.auraA + dt * 2);
+    if (d.barkCd > 0) d.barkCd -= dt;
+    return;
+  }
 
   // fetch: chase a grounded treat, gobble it, trot home
   if (d.fetchCd > 0) d.fetchCd -= dt;
@@ -415,8 +419,37 @@ function becomeGuardian(d) {
     else if (feedables().length === 0) winGame();
   });
 }
-function winGame() {
-  bank();
+function guardianBark(g) {
+  g.barkCd = 8;
+  sfx.woof(); shake(6);
+  zoomPunch(g.x, g.y - 30, 1.07, 0.35);
+  G.parts.push({ kind: 'bark', x: g.x, y: g.y - 20, t: 0.4, max: 0.4, color: '#f1c40f' });
+  pow(g.x, g.y - 70, 'WOOF!!', '#f1c40f');
+  const R = 240;
+  // squirrels inside get bonked (no points — it's a utility, not a farm)
+  for (const s of [...G.squirrels]) {
+    if (s.state !== 'ko' && dist(s.x, s.y, g.x, g.y) < R) bonkSquirrel(s, false);
+  }
+  // birds flee and abort dives
+  for (const b of G.birds) {
+    if (b.state === 'ko') continue;
+    if (dist(b.x, b.y, g.x, g.y) < R) {
+      b.dir = b.x < g.x ? -1 : 1;
+      if (b.state !== 'cruise') { b.state = 'cruise'; b.diveCd = 3; }
+      if (b.carrying) { // scared birds drop the loot
+        const t = b.carrying; b.carrying = null;
+        t.state = 'air'; t.vx = rand(-40, 40); t.vy = 60; t.groundY = Math.min(H * 0.85, b.y + rand(80, 160));
+        G.treats.push(t);
+      }
+    }
+  }
+  // friendly-fire: nearby non-guardian dogs slam their mouths shut, startled
+  for (const d of feedables()) {
+    if (d.freeOpenT > 0 || dist(d.x, d.y, g.x, g.y) >= R) continue;
+    d.mouthOpen = false; d.mouthT = 1.2;
+  }
+}
+function winGame() {  bank();
   const bonus = 5000 * G.heat;
   G.score += bonus;
   G.won = true;
@@ -1006,6 +1039,10 @@ cv.addEventListener('pointerdown', e => {
   const acorn = G.treats.find(t => t.state === 'ground' && t.isAcorn && dist(x, y, t.x, t.y) < 44);
   if (acorn) { acorn.held = true; G.aim = { sx: acorn.x, sy: acorn.y, mx: x, my: y, acorn, pid: e.pointerId }; return; }
 
+  // tap a guardian: BARK shockwave (area denial with a friendly-fire startle)
+  const gd = G.dogs.find(dd => dd.guardian && dd.barkCd <= 0 && dist(x, y, dd.x, dd.y - 20) < 64);
+  if (gd) { guardianBark(gd); return; }
+
   // tap a dog to send it fetching a grounded treat
   const fd = feedables().find(dd => !dd.taunted && dd.fetchCd <= 0 && !dd.fetching && dist(x, y, dd.x, dd.y - 20) < 58);
   if (fd) {
@@ -1502,6 +1539,20 @@ function drawDog(d) {
       cx.fillStyle = '#fff';
       cx.beginPath(); cx.arc(hx + hr * 0.5, cy0, 2.5 * s, 0, TAU); cx.fill();
     }
+    // bark cooldown / ready indicator
+    if (d.guardian) {
+      if (d.barkCd > 0) {
+        cx.strokeStyle = 'rgba(255,255,255,0.35)'; cx.lineWidth = 3;
+        cx.beginPath(); cx.arc(hx, hy - hr - 12, 7, 0, TAU); cx.stroke();
+        cx.strokeStyle = '#f1c40f';
+        cx.beginPath(); cx.arc(hx, hy - hr - 12, 7, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - d.barkCd / 8)); cx.stroke();
+      } else {
+        cx.font = '13px sans-serif'; cx.textAlign = 'center';
+        cx.globalAlpha = 0.7 + Math.sin(performance.now() / 250) * 0.3;
+        cx.fillText('💬', hx, hy - hr - 8);
+        cx.globalAlpha = 1;
+      }
+    }
   }
 
   cx.globalAlpha = 1;
@@ -1723,6 +1774,11 @@ function drawParticles() {
     if (p.kind === 'ring') {
       cx.strokeStyle = p.color; cx.lineWidth = 4 * a;
       cx.beginPath(); cx.arc(p.x, p.y, p.size + (1 - a) * 90, 0, TAU); cx.stroke();
+    } else if (p.kind === 'bark') {
+      cx.strokeStyle = p.color; cx.lineWidth = 7 * a;
+      cx.beginPath(); cx.arc(p.x, p.y, 24 + (1 - a) * 216, 0, TAU); cx.stroke();
+      cx.strokeStyle = 'rgba(255,255,255,0.5)'; cx.lineWidth = 3 * a;
+      cx.beginPath(); cx.arc(p.x, p.y, 10 + (1 - a) * 180, 0, TAU); cx.stroke();
     } else if (p.kind === 'pow') {
       // comic starburst with the word punched in
       cx.save();
