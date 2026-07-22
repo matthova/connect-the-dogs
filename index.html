@@ -188,6 +188,7 @@ function resetGame() {
   G.timers = [];
   G.birdTimer = 12; G.sqTimer = 10;
   G.wind = 0; G.windT = 0; G.windDir = 1; G.windTimer = 40; G.leafAcc = 0;
+  G.shroom = null; G.shroomTimer = 45;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
@@ -525,6 +526,11 @@ function updateTreat(t, dt) {
             pow(hp.x, hp.y - 44, 'SKEWERED! +' + fmt(pb), '#ff7675');
             hitstop(0.05); ringBurst(hp.x, hp.y, '#ff7675');
           }
+          if (t.shroomed && !t.isAcorn) {
+            const sb = 50 * CHAIN_STEPS[G.chainStep];
+            if (G.frenzyT > 0) G.score += sb; else G.unbanked += sb;
+            pow(hp.x, hp.y - 44, 'BANK SHOT! +' + fmt(sb), '#ff8888', true);
+          }
           feedDog(d, t.isAcorn);
           removeTreat(t);
         } else if (t.vy > -50) {
@@ -556,6 +562,16 @@ function updateTreat(t, dt) {
         if (!pierceThrough(t)) { removeTreat(t); return; }
         break;
       }
+    }
+    // bounce shroom: trampoline instead of landing
+    if (t.vy > 0 && G.shroom && dist(t.x, t.y, G.shroom.x, G.shroom.y) < 28) {
+      t.vy = -rand(750, 950);
+      t.vx = t.vx * 0.6 + rand(-40, 40);
+      t.shroomed = true;
+      G.shroom.sq = 1;
+      sfx.boing();
+      burst(t.x, t.y, 4, '#ff8888', 2);
+      return;
     }
     // landing
     if (t.vy > 0 && t.y >= t.groundY) {
@@ -808,6 +824,11 @@ function updateSquirrel(s, dt) {
     return;
   }
   // aura avoidance (fat squirrels barge straight through)
+  if (G.shroom && dist(s.x, s.y, G.shroom.x, G.shroom.y) < 26) {
+    G.shroom.sq = 1;
+    bonkSquirrel(s, false);
+    return;
+  }
   function move(tx, ty, sp) {
     let dx = tx - s.x, dy = ty - s.y;
     const dd = Math.hypot(dx, dy) || 1;
@@ -1136,6 +1157,25 @@ function update(dt) {
     }
   } else G.wind = 0;
 
+  // bounce shroom: spawns away from dogs, lives 25s
+  G.shroomTimer -= dt;
+  if (G.shroomTimer <= 0 && !G.shroom && G.t > 30) {
+    let sx2 = W / 2, sy2 = H * 0.72;
+    for (let tries = 0; tries < 20; tries++) {
+      sx2 = rand(W * 0.15, W * 0.85); sy2 = rand(H * 0.66, H * 0.78);
+      if (!G.dogs.some(d => dist(sx2, sy2, d.x, d.y) < 95)) break;
+    }
+    G.shroom = { x: sx2, y: sy2, t: 25, sq: 0 };
+    G.shroomTimer = 40;
+    addText(sx2, sy2 - 40, '🍄 BOUNCY!', '#ff8888', 17);
+    ringBurst(sx2, sy2, '#e74c3c');
+  }
+  if (G.shroom) {
+    G.shroom.t -= dt;
+    if (G.shroom.sq > 0) G.shroom.sq -= dt * 3;
+    if (G.shroom.t <= 0) { burst(G.shroom.x, G.shroom.y, 6, '#e74c3c', 2); G.shroom = null; }
+  }
+
   // spawns
   G.birdTimer -= dt;
   if (G.birdTimer <= 0 && G.t > 8) {
@@ -1184,6 +1224,7 @@ function draw() {
 
   // grounded treats + shadows
   for (const t of G.treats) if (t.state === 'ground') drawTreat(t);
+  if (G.shroom) drawShroom();
 
   // sort actors by y for pseudo-depth
   const actors = [];
@@ -1258,8 +1299,25 @@ function drawYard() {
   }
 }
 
-function drawAura(d) {
-  const a = d.auraA;
+function drawShroom() {
+  const m = G.shroom;
+  cx.save();
+  // blink out in the last 4s
+  if (m.t < 4) cx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(m.t * 5));
+  const sqk = 1 - 0.4 * Math.sin(Math.PI * clamp(m.sq, 0, 1));
+  cx.translate(m.x, m.y);
+  cx.scale(1 + (1 - sqk) * 0.5, sqk);
+  cx.beginPath(); cx.ellipse(0, 8, 16, 5, 0, 0, TAU);
+  cx.fillStyle = 'rgba(0,0,0,0.18)'; cx.fill();
+  cx.fillStyle = '#e8d5b7';
+  cx.fillRect(-5, -6, 10, 14);
+  cx.fillStyle = '#e74c3c';
+  cx.beginPath(); cx.ellipse(0, -10, 20, 12, 0, Math.PI, 0); cx.fill();
+  cx.fillStyle = '#fff';
+  cx.beginPath(); cx.arc(-8, -13, 3, 0, TAU); cx.arc(6, -16, 2.5, 0, TAU); cx.arc(12, -11, 2, 0, TAU); cx.fill();
+  cx.restore();
+}
+function drawAura(d) {  const a = d.auraA;
   const pulse = 1 + Math.sin(performance.now() / 400) * 0.03;
   cx.beginPath(); cx.arc(d.x, d.y, AURA_R * a * pulse, 0, TAU);
   cx.fillStyle = 'rgba(241,196,15,0.08)'; cx.fill();
