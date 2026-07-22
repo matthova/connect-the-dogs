@@ -1,0 +1,1566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Chomp Chain — Treat Yard Tycoon</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#1a2a1a; height:100%; }
+  canvas { display:block; touch-action:none; cursor:crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+/* =========================================================================
+   CHOMP CHAIN: TREAT YARD TYCOON
+   Flick treats to growing dogs. Bank your greed chain before the birds and
+   squirrels shatter it. Grown dogs become spiked-collar guardians — but every
+   guardian makes the yard meaner.
+   ========================================================================= */
+
+// ---------- canvas ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  cx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', () => {
+  resize();
+  // re-anchor entities that store pixel positions
+  if (G.dogs) for (const d of G.dogs) {
+    if (!d.leaving && d.walkIn <= 0) { d.x = d.fx * W; d.y = d.fy * H; }
+  }
+  if (G.treats) for (const t of G.treats) {
+    if (!t.bounced && t.state === 'air') t.groundY = H * 0.88;
+  }
+});
+resize();
+
+// ---------- utils ----------
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[(Math.random() * arr.length) | 0];
+const TAU = Math.PI * 2;
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const shade = (hex, f) => { // darken/lighten a #rrggbb color by factor f
+  const n = parseInt(hex.slice(1), 16);
+  const ch = s => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+};
+
+// ---------- constants ----------
+const GRAV = 1800;
+const TIER_TREATS = [0, 4, 9, 15, 22, 30];           // cumulative treats per tier
+const TIER_COLORS = ['#e74c3c', '#e67e22', '#2ecc71', '#3498db', '#9b59b6', '#f1c40f'];
+const TIER_NAMES  = ['RED', 'ORANGE', 'GREEN', 'BLUE', 'PURPLE', 'SPIKED GOLD'];
+const CHAIN_STEPS = [1, 2, 3, 4, 5, 6, 8];
+const CHAIN_WORDS = ['', 'TASTY!', 'YUMMY!', 'DELICIOUS!', 'DELICIOUS!', 'INCREDIBLE!', 'LEGENDARY DOG FEAST!'];
+const AURA_R = 130;
+const MAX_AIRBORNE = 3;
+const GROUND_TTL = 4;
+
+// yard slots (fractions of screen). Row order: far, mid, near.
+// Columns are staggered so no far slot sits directly behind a near slot.
+const SLOTS = [
+  { fx: 0.20, fy: 0.30 }, { fx: 0.44, fy: 0.28 }, { fx: 0.78, fy: 0.30 },
+  { fx: 0.30, fy: 0.46 }, { fx: 0.68, fy: 0.46 },
+  { fx: 0.14, fy: 0.62 }, { fx: 0.56, fy: 0.62 }, { fx: 0.86, fy: 0.62 },
+];
+// A max-power flick must always clear the far row, whatever the screen height.
+function maxLaunch() { return Math.max(1400, Math.sqrt(2 * GRAV * 0.78 * H)); }
+
+// ---------- audio ----------
+let AC = null, muted = false;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(freq, dur, type, vol, slideTo, delay) {
+  const ac = audio(); if (!ac || muted) return;
+  const t0 = ac.currentTime + (delay || 0);
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+  g.gain.setValueAtTime(vol || 0.15, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function noise(dur, vol, hp, delay) {
+  const ac = audio(); if (!ac || muted) return;
+  const t0 = ac.currentTime + (delay || 0);
+  const n = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, n, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const g = ac.createGain(); g.gain.value = vol || 0.15;
+  const f = ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp || 800;
+  src.connect(f); f.connect(g); g.connect(ac.destination);
+  src.start(t0);
+}
+// major scale climbing with chain
+const SCALE = [261.6, 293.7, 329.6, 349.2, 392, 440, 523.3];
+const sfx = {
+  pop: step => tone(SCALE[clamp(step, 0, 6)], 0.14, 'square', 0.10, SCALE[clamp(step, 0, 6)] * 1.5),
+  chomp: tier => { tone(600 - tier * 90, 0.1, 'square', 0.14, 200); noise(0.06, 0.08, 2000); },
+  bark: tier => { const f = 600 - tier * 90; tone(f, 0.12, 'sawtooth', 0.14, f * 0.6); tone(f * 1.5, 0.1, 'square', 0.06, f, 0.06); },
+  woof: () => { tone(150, 0.35, 'sawtooth', 0.3, 70); tone(90, 0.4, 'sine', 0.25, 50); },
+  shatter: () => { noise(0.35, 0.25, 2500); tone(1200, 0.3, 'sawtooth', 0.08, 150); },
+  coin: i => tone(880 + i * 110, 0.08, 'square', 0.07, 1400 + i * 110, i * 0.035),
+  boing: () => tone(180, 0.22, 'sine', 0.2, 500),
+  screech: () => noise(0.18, 0.12, 3500),
+  whistle: () => tone(1400, 0.25, 'sine', 0.06, 2200),
+  bell: () => { tone(1568, 0.6, 'sine', 0.2); tone(2093, 0.5, 'sine', 0.12, null, 0.1); },
+  whimper: () => tone(500, 0.5, 'sine', 0.12, 250),
+  thud: () => tone(80, 0.15, 'sine', 0.25, 40),
+  tick: () => tone(1000, 0.04, 'square', 0.05),
+};
+
+// ---------- game state ----------
+const G = {};
+G.timers = [];                 // in-game-time scheduled callbacks
+// storage may be blocked (sandboxed iframes) — never let it kill the game
+const store = (() => { try { return window.localStorage; } catch (e) { return null; } })();
+function resetGame() {
+  G.state = 'title';           // title | play | over
+  G.t = 0;                     // run elapsed
+  G.timeScale = 1;
+  G.slowT = 0; G.hitstop = 0; G.shake = 0;
+  G.score = 0; G.unbanked = 0; G.chainStep = 0;
+  G.bestChain = 1; G.biggestPileLost = 0; G.spikedCount = 0;
+  G.heat = 0;
+  G.dogsLost = 0; G.won = false;
+  G.everTiered = false; G.fedOnce = false; G.firstBird = false;
+  G.frenzyT = 0; G.frenzyCd = 0;
+  G.timers = [];
+  G.birdTimer = 12; G.sqTimer = 10;
+  G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
+  G.parts = []; G.texts = []; G.coins = [];
+  G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
+  G.pileJit = 0; G.flashT = 0; G.flashCol = null;
+  G.closeCallCd = 0;
+  G.gameOverT = 0; G.graduates = [];
+  // starting roster: near + both mid slots (far row unlocks as you play)
+  spawnDog(6); spawnDog(3); spawnDog(4);
+}
+G.best = +((store && store.getItem('chompchain_best')) || 0);
+resetGame();
+
+// ---------- dogs ----------
+function spawnDog(slotIdx, walkIn) {
+  const s = SLOTS[slotIdx];
+  const d = {
+    slot: slotIdx, fx: s.fx, fy: s.fy,
+    x: s.fx * W, y: s.fy * H,
+    treats: 0, tier: 0,
+    scale: 1, targetScale: 1, squash: 0,
+    hunger: 1,
+    mouthOpen: true, mouthT: rand(0.2, 0.8),
+    taunted: false, freeOpenT: 0,
+    guardian: false, auraA: 0,
+    blinkT: rand(1, 4), hopT: 0, wagPhase: rand(0, TAU),
+    walkIn: walkIn ? 1 : 0, leaving: false, leaveX: 0,
+    flashT: 0, sadT: 0, deflateT: 0,
+    breed: pick(['#c68642', '#8d6748', '#e8d5b7', '#6b6b6b', '#a0522d']),
+  };
+  if (walkIn) { d.x = d.fx < 0.5 ? -60 : W + 60; }
+  G.dogs.push(d);
+  return d;
+}
+function dogTier(treats) {
+  let t = 0;
+  for (let i = 0; i < TIER_TREATS.length; i++) if (treats >= TIER_TREATS[i]) t = i;
+  return t;
+}
+// every single treat visibly grows the dog: 1.0x empty → 2.2x at 30 treats
+function growthScale(treats) { return 1 + 1.2 * Math.min(treats, 30) / 30; }
+function dogSize(d) { return d.scale; }
+function headPos(d) { const s = dogSize(d); return { x: d.x, y: d.y - 34 * s, r: 20 * s }; }
+function catchR(d) { return 28 + 8.5 * d.tier; }
+function mouthCycle(d) { return { open: 0.9 + 0.125 * d.tier, closed: 0.6 + 0.2 * d.tier }; }
+function freeSlot() {
+  const used = new Set(G.dogs.map(d => d.slot));
+  const free = SLOTS.map((_, i) => i).filter(i => !used.has(i));
+  return free.length ? pick(free) : -1;
+}
+function feedables() { return G.dogs.filter(d => !d.guardian && !d.leaving && d.walkIn <= 0); }
+
+function updateDog(d, dt) {
+  d.wagPhase += dt * (4 + G.chainStep * 1.5);
+  d.blinkT -= dt; if (d.blinkT < -0.12) d.blinkT = rand(2, 5);
+  if (d.hopT > 0) d.hopT -= dt;
+  if (d.flashT > 0) d.flashT -= dt;
+  if (d.sadT > 0) d.sadT -= dt;
+  if (d.deflateT > 0) d.deflateT = Math.max(0, d.deflateT - dt);
+  if (d.squash > 0) d.squash = Math.max(0, d.squash - dt * 3);
+  d.scale = lerp(d.scale, d.targetScale, 1 - Math.pow(0.001, dt));
+
+  // walk in from off screen
+  if (d.walkIn > 0) {
+    const tx = d.fx * W;
+    d.x = lerp(d.x, tx, 1 - Math.pow(0.005, dt));
+    if (Math.abs(d.x - tx) < 3) { d.x = tx; d.walkIn = 0; }
+    d.y = d.fy * H;
+    return;
+  }
+  // sad walk-off
+  if (d.leaving) {
+    d.x += d.leaveX * dt;
+    if (d.x < -80 || d.x > W + 80) G.dogs.splice(G.dogs.indexOf(d), 1);
+    return;
+  }
+  d.x = d.fx * W; d.y = d.fy * H;
+
+  if (d.guardian) { d.auraA = Math.min(1, d.auraA + dt * 2); return; }
+
+  // mouth cycle (locked shut while taunted; locked open in frenzy / free window)
+  const cyc = mouthCycle(d);
+  if (d.freeOpenT > 0) { d.freeOpenT -= dt; d.mouthOpen = true; }
+  else if (G.frenzyT > 0) { d.mouthOpen = true; }
+  else if (d.taunted) { d.mouthOpen = false; }
+  else {
+    d.mouthT -= dt;
+    if (d.mouthT <= 0) {
+      d.mouthOpen = !d.mouthOpen;
+      d.mouthT = d.mouthOpen ? cyc.open : cyc.closed;
+    }
+  }
+
+  // hunger — leaky bucket
+  const tighten = 1 + Math.min(0.4, 0.05 * (G.t / 30));
+  let drain = tighten / (20 + 2.5 * d.tier);
+  if (d.taunted) drain *= 3;
+  if (G.frenzyT > 0) drain = 0;
+  d.hunger -= drain * dt;
+  if (d.hunger <= 0) {
+    if (d.treats > 0) {
+      // deflate 3 treats of progress — collar can visibly downgrade
+      d.treats = Math.max(0, d.treats - 3);
+      const nt = dogTier(d.treats);
+      if (nt < d.tier) { d.tier = nt; addText(d.x, d.y - 90, 'COLLAR LOST!', '#e74c3c', 20); }
+      d.targetScale = growthScale(d.treats); d.deflateT = 0.5;
+      d.hunger = 1; d.sadT = 1.5;
+      sfx.whimper();
+      addText(d.x, d.y - 60, '-3 treats', '#ff8888', 16);
+      burst(d.x, d.y - 40, 8, '#88aaff', 2);
+    } else {
+      // pup with nothing leaves the yard for good
+      d.leaving = true; d.leaveX = d.x < W / 2 ? -120 : 120;
+      d.taunted = false;
+      G.dogsLost++;
+      sfx.whimper();
+      addText(d.x, d.y - 70, 'A DOG LEFT... 💔', '#ff6666', 22);
+      shake(6);
+      if (G.dogsLost >= 3) gameOver();
+    }
+  }
+}
+
+function feedDog(d, isAcorn, fromGround) {
+  const prevTier = d.tier;
+  if (isAcorn) {
+    d.treats = d.tier + 1 < TIER_TREATS.length ? TIER_TREATS[d.tier + 1] : d.treats + 1;
+  } else {
+    d.treats++;
+  }
+  d.tier = dogTier(d.treats);
+  d.hunger = Math.min(1, d.hunger + 0.4);
+  d.targetScale = growthScale(d.treats); d.squash = 1;
+  d.hopT = 0.3;
+  G.fedOnce = true;
+  const hp = headPos(d);
+  burst(hp.x, hp.y, 6, '#d2a24c', 2); // crumbs
+  sfx.chomp(d.tier);
+  shake(2 + d.tier * 1.2);
+  if (d.tier === 4) hitstop(0.03);
+
+  // chain up (ground gobbles keep the chain but don't climb it — aim matters)
+  if (!fromGround) chainUp();
+  const mult = CHAIN_STEPS[G.chainStep];
+  const pts = (fromGround ? 50 : 100) * mult * (isAcorn ? 3 : 1);
+  if (G.frenzyT > 0) { G.score += pts; addText(hp.x, hp.y - 30, '+' + fmt(pts), '#ffd700', 18); }
+  else { G.unbanked += pts; G.pileJit = 1; addText(hp.x, hp.y - 30, (fromGround ? 'GOBBLED +' : '+') + fmt(pts), '#fff', 16); }
+
+  if (d.tier > prevTier) tierUp(d);
+}
+
+function tierUp(d) {
+  const hp = headPos(d);
+  d.flashT = 0.4;
+  G.everTiered = true;
+  ringBurst(hp.x, hp.y, TIER_COLORS[d.tier]);
+  confetti(hp.x, hp.y, 14);
+  sfx.bark(d.tier);
+  hitstop(0.06);
+  shake(5);
+  bank();
+  addText(d.x, d.y - 100, TIER_NAMES[d.tier] + ' COLLAR!', TIER_COLORS[d.tier], 22);
+  if (d.tier >= 5) becomeGuardian(d);
+}
+
+function becomeGuardian(d) {
+  d.guardian = true; d.taunted = false; d.mouthOpen = false;
+  G.heat++; G.spikedCount++;
+  G.slowT = 0.4;
+  sfx.woof();
+  shake(10);
+  addText(d.x, d.y - 120, '🛡 GUARDIAN! HEAT +1', '#f1c40f', 26);
+  flash('#f1c40f22');
+  // replacement pup trots in after 2s — or, if the yard is full of guardians,
+  // you've MASTERED it (prevents the all-guardian do-nothing softlock)
+  setTimeout2(2, () => {
+    if (G.state !== 'play') return;
+    const s = freeSlot();
+    if (s >= 0) spawnDog(s, true);
+    else if (feedables().length === 0) winGame();
+  });
+}
+function winGame() {
+  bank();
+  const bonus = 5000 * G.heat;
+  G.score += bonus;
+  G.won = true;
+  addText(W / 2, H * 0.4, '🏆 YARD MASTERED! +' + fmt(bonus), '#ffd700', 30);
+  confetti(W / 2, H * 0.4, 40);
+  sfx.bell(); sfx.woof();
+  gameOver();
+}
+
+// poor-man's scheduled callbacks that respect game time
+function setTimeout2(sec, fn) { G.timers.push({ t: sec, fn }); }
+
+// ---------- chain / banking ----------
+function chainUp() {
+  if (G.frenzyT > 0) return;
+  if (G.chainStep < CHAIN_STEPS.length - 1) {
+    G.chainStep++;
+    sfx.pop(G.chainStep);
+    G.bestChain = Math.max(G.bestChain, CHAIN_STEPS[G.chainStep]);
+    const word = CHAIN_WORDS[G.chainStep];
+    if (word) addText(W / 2, H * 0.35, word + '  ×' + CHAIN_STEPS[G.chainStep], '#ffd700', 18 + G.chainStep * 4);
+    if (G.chainStep === CHAIN_STEPS.length - 1) startFrenzy();
+  } else {
+    sfx.pop(6);
+  }
+}
+function breakChain(x, y, reason, soft) {
+  if (G.frenzyT > 0) return; // frenzy points bank on arrival — nothing to shatter
+  if (G.chainStep === 0 && G.unbanked === 0) return;
+  // learning mercy: early misses/wastes only dent the chain instead of shattering it
+  if (soft && (G.t < 20 || !G.everTiered)) {
+    G.chainStep = Math.max(0, G.chainStep - 1);
+    if (G.unbanked > 0) {
+      const lost = Math.round(G.unbanked * 0.25);
+      G.unbanked -= lost;
+      addText(x, y, reason + ' −' + fmt(lost), '#ffaa66', 15);
+    } else if (reason) addText(x, y, reason, '#ffaa66', 14);
+    sfx.tick();
+    return;
+  }
+  G.biggestPileLost = Math.max(G.biggestPileLost, G.unbanked);
+  if (G.unbanked > 0) {
+    sfx.shatter();
+    // coins scatter
+    for (let i = 0; i < Math.min(18, 4 + G.unbanked / 200); i++) {
+      G.coins.push({ x: pileX(), y: pileY(), vx: rand(-250, 250), vy: rand(-350, -50), t: rand(0.5, 0.9), scatter: true });
+    }
+    addText(W / 2, H * 0.3, 'CHAIN SHATTERED! −' + fmt(G.unbanked), '#ff4444', 24);
+    G.slowT = 0.25;
+    shake(8);
+  } else {
+    sfx.tick();
+  }
+  if (reason) addText(x, y, reason, '#ff8866', 15);
+  G.unbanked = 0;
+  G.chainStep = 0;
+}
+function bank() {
+  if (G.unbanked <= 0) return;
+  const amt = G.unbanked;
+  G.score += amt; G.unbanked = 0;
+  const n = clamp(Math.round(amt / 150), 6, 20);
+  for (let i = 0; i < n; i++) {
+    G.coins.push({ x: pileX() + rand(-14, 14), y: pileY() + rand(-10, 10), vx: 0, vy: 0, t: 0.55 + i * 0.03, toScore: true });
+    sfx.coin(Math.min(i, 7));
+  }
+  addText(pileX() + 60, pileY(), 'BANKED +' + fmt(amt), '#ffd700', 20);
+}
+function pileX() { return 24 + 46; }
+function pileY() { return 92; }
+
+// ---------- frenzy ----------
+function startFrenzy() {
+  G.frenzyT = 5;
+  bank();
+  sfx.bell();
+  addText(W / 2, H * 0.45, '🔔 FEEDING FRENZY! TAP TAP TAP!', '#ffd700', 28);
+  flash('#ffd70033');
+}
+function endFrenzy() {
+  G.chainStep = 0;
+  // The Reckoning: 4 birds + 2 squirrels over 3s
+  addText(W / 2, H * 0.3, '⚠ THE RECKONING ⚠', '#ff4444', 30);
+  sfx.screech();
+  shake(6);
+  for (let i = 0; i < 4; i++) setTimeout2(0.4 + i * 0.65, () => spawnBird(true));
+  for (let i = 0; i < 2; i++) setTimeout2(0.8 + i * 1.1, () => spawnSquirrel(true));
+}
+
+// ---------- treats ----------
+function launchTreat(x, y, vx, vy, isAcorn) {
+  const sp = Math.hypot(vx, vy);
+  G.treats.push({
+    x, y, vx, vy, rot: 0, vrot: rand(-9, 9),
+    state: 'air', isAcorn: !!isAcorn, groundT: 0,
+    groundY: H * 0.88, closeCalled: false,
+    trail: [],
+  });
+  if (sp > 900) sfx.whistle();
+}
+function airborneTreats() { return G.treats.filter(t => t.state === 'air'); }
+
+function updateTreat(t, dt) {
+  if (t.state === 'air') {
+    t.vy += GRAV * dt;
+    t.x += t.vx * dt; t.y += t.vy * dt;
+    t.rot += t.vrot * dt;
+    t.trail.push({ x: t.x, y: t.y, a: 1 });
+    if (t.trail.length > 8) t.trail.shift();
+
+    // out of bounds = miss
+    if (t.x < -40 || t.x > W + 40 || t.y > H + 40) {
+      removeTreat(t);
+      if (!t.isAcorn) breakChain(clamp(t.x, 40, W - 40), H - 60, 'missed!', true);
+      return;
+    }
+
+    // dog catch / bounce
+    for (const d of G.dogs) {
+      if (d.guardian || d.leaving || d.walkIn > 0) continue;
+      const hp = headPos(d);
+      if (dist(t.x, t.y, hp.x, hp.y) < catchR(d)) {
+        if (d.mouthOpen || t.isAcorn) {
+          feedDog(d, t.isAcorn);
+          removeTreat(t);
+        } else if (t.vy > -50) {
+          // bonk off closed snout
+          t.vy = -Math.abs(t.vy) * 0.4; t.vx *= 0.5;
+          t.groundY = d.y + 26;
+          t.bounced = true;
+          sfx.tick();
+          burst(t.x, t.y, 3, '#ffffff', 1.5);
+        }
+        return;
+      }
+    }
+    // mid-air pest knockouts
+    for (const b of G.birds) {
+      if (b.state === 'ko') continue;
+      if (dist(t.x, t.y, b.x, b.y) < 26) { koBird(b, true); removeTreat(t); return; }
+    }
+    for (const s of G.squirrels) {
+      if (s.state === 'ko') continue;
+      if (dist(t.x, t.y, s.x, s.y) < 26 && t.vy > 0) { bonkSquirrel(s, true); removeTreat(t); return; }
+    }
+    // landing
+    if (t.vy > 0 && t.y >= t.groundY) {
+      t.state = 'ground'; t.groundT = GROUND_TTL; t.y = t.groundY;
+      burst(t.x, t.y, 3, '#c9b458', 1.5);
+    }
+  } else if (t.state === 'ground') {
+    if (t.held) return; // player is aiming this acorn — freeze the clock
+    // a hungry dog will gobble a treat lying at its feet (half points, no chain climb)
+    for (const d of G.dogs) {
+      if (d.guardian || d.leaving || d.walkIn > 0 || !d.mouthOpen) continue;
+      if (dist(t.x, t.y, d.x, d.y + 8) < catchR(d) + 24) {
+        feedDog(d, t.isAcorn, true);
+        removeTreat(t);
+        return;
+      }
+    }
+    t.groundT -= dt;
+    if (t.groundT <= 0) {
+      removeTreat(t);
+      if (!t.isAcorn) breakChain(t.x, t.y, 'wasted!', true);
+    }
+  }
+}
+function removeTreat(t) { const i = G.treats.indexOf(t); if (i >= 0) G.treats.splice(i, 1); }
+function inAnyAura(x, y) {
+  return G.dogs.some(d => d.guardian && dist(x, y, d.x, d.y) < AURA_R);
+}
+
+// ---------- birds ----------
+function spawnBird(force) {
+  const cap = Math.min(5, 1 + Math.floor(G.t / 45) + G.heat);
+  if (!force && G.birds.filter(b => b.state !== 'ko').length >= cap) return;
+  if (!G.firstBird) {
+    G.firstBird = true;
+    sfx.screech();
+    addText(W / 2, H * 0.14, '🐦 BIRDS INCOMING — they snatch flying treats!', '#ffdddd', 17);
+  }
+  const fromLeft = Math.random() < 0.5;
+  const magpie = G.heat >= 2 && Math.random() < 0.3;
+  G.birds.push({
+    x: fromLeft ? -40 : W + 40, y: rand(H * 0.08, H * 0.35),
+    dir: fromLeft ? 1 : -1, baseY: rand(H * 0.1, H * 0.35),
+    phase: rand(0, TAU), speed: rand(90, 140) * (magpie ? 1.25 : 1),
+    state: 'cruise', diveCd: rand(0.5, 2), teleT: 0, target: null,
+    carrying: null, koT: 0, fakeDone: false, magpie, flap: rand(0, TAU),
+  });
+}
+function koBird(b, byTreat) {
+  b.state = 'ko'; b.koT = 1.2;
+  sfx.boing(); noise(0.1, 0.1, 1500);
+  burst(b.x, b.y, 8, b.magpie ? '#dddddd' : '#7fb3d5', 2.5, 'feather');
+  if (b.carrying) { // stolen loot rains back down
+    const t = b.carrying; b.carrying = null;
+    t.state = 'air'; t.vx = rand(-40, 40); t.vy = 50; t.groundY = Math.min(H * 0.85, b.y + rand(80, 160));
+    G.treats.push(t);
+    addText(b.x, b.y, 'DROPPED IT!', '#aaffaa', 16);
+  }
+  if (byTreat) {
+    chainUp();
+    const pts = 50 * CHAIN_STEPS[G.chainStep];
+    if (G.frenzyT > 0) G.score += pts; else G.unbanked += pts;
+    addText(b.x, b.y - 20, '+' + fmt(pts) + ' BEANED!', '#ffd700', 17);
+    hitstop(0.04);
+  }
+  shake(3);
+}
+function updateBird(b, dt) {
+  b.flap += dt * 14;
+  if (b.state === 'ko') {
+    b.koT -= dt; b.y += 260 * dt; b.x += Math.sin(b.koT * 18) * 60 * dt;
+    if (b.koT <= 0) G.birds.splice(G.birds.indexOf(b), 1);
+    return;
+  }
+  if (b.state === 'cruise') {
+    b.x += b.dir * b.speed * dt;
+    b.phase += dt * 1.6;
+    b.y = b.baseY + Math.sin(b.phase) * 34;
+    // bounce off guardian auras
+    for (const d of G.dogs) {
+      if (!d.guardian) continue;
+      if (dist(b.x, b.y, d.x, d.y) < AURA_R + 16) {
+        b.dir *= -1; b.x += b.dir * 10;
+        burst(b.x, b.y, 3, '#f1c40f', 1.5);
+        break;
+      }
+    }
+    if (b.x < -60 && b.dir < 0) { b.x = -60; b.dir = 1; }
+    if (b.x > W + 60 && b.dir > 0) { b.x = W + 60; b.dir = -1; }
+    b.diveCd -= dt;
+    if (b.diveCd <= 0) {
+      // hunt: airborne treats, or high-lobbed acorns
+      const targets = airborneTreats().filter(t =>
+        (!t.isAcorn || t.y < H * 0.45) && !inAnyAura(t.x, t.y) && t.y > H * 0.02);
+      if (targets.length) {
+        b.target = targets.reduce((a, c) => dist(b.x, b.y, c.x, c.y) < dist(b.x, b.y, a.x, a.y) ? c : a);
+        b.state = 'tele'; b.teleT = 0.7; b.fakeDone = false;
+        sfx.screech();
+      } else b.diveCd = 0.4;
+    }
+  } else if (b.state === 'tele') {
+    b.teleT -= dt;
+    b.x += b.dir * b.speed * 0.3 * dt;
+    if (!b.target || G.treats.indexOf(b.target) < 0 || b.target.state !== 'air') { b.state = 'cruise'; b.diveCd = 1; return; }
+    if (b.teleT <= 0) b.state = 'dive';
+  } else if (b.state === 'dive') {
+    if (!b.target || G.treats.indexOf(b.target) < 0 || b.target.state !== 'air' || inAnyAura(b.target.x, b.target.y)) {
+      b.state = 'cruise'; b.diveCd = 3; return;
+    }
+    const t = b.target;
+    // magpie fakes its first dive
+    const sp = 560;
+    const dx = t.x + t.vx * 0.1 - b.x, dy = t.y + t.vy * 0.1 - b.y;
+    const dd = Math.hypot(dx, dy) || 1;
+    b.x += dx / dd * sp * dt; b.y += dy / dd * sp * dt;
+    // close call spark
+    if (!t.closeCalled && dd < 34 && G.closeCallCd <= 0) {
+      t.closeCalled = true;
+    }
+    if (b.magpie && !b.fakeDone && dd < 90) {
+      b.fakeDone = true; b.state = 'fakeout'; b.teleT = 0.6;
+      addText(b.x, b.y, 'FAKE!', '#ffffff', 14);
+      return;
+    }
+    if (dd < 22) {
+      // grab!
+      removeTreat(t);
+      t.state = 'carried';
+      b.carrying = t; b.state = 'carry';
+      b.stealMult = CHAIN_STEPS[G.chainStep];
+      sfx.screech();
+      addText(b.x, b.y, 'SNATCHED!', '#ff6666', 18);
+    }
+  } else if (b.state === 'fakeout') {
+    b.teleT -= dt;
+    b.y -= 200 * dt;
+    if (b.teleT <= 0) b.state = 'dive';
+  } else if (b.state === 'carry') {
+    // near-miss slow-mo opportunity to tap
+    b.y -= 190 * dt; b.x += b.dir * 230 * dt;
+    if (b.x < -50 || b.x > W + 50 || b.y < -50) {
+      // escaped with the goods
+      G.birds.splice(G.birds.indexOf(b), 1);
+      if (b.carrying && b.carrying.isAcorn) addText(W / 2, H * 0.3, 'ACORN LOST!', '#ffaa44', 20);
+      else breakChain(clamp(b.x, 60, W - 60), 80, 'stolen!');
+    }
+  }
+}
+
+// ---------- squirrels ----------
+function spawnSquirrel(force) {
+  const cap = Math.min(5, 2 + G.heat);
+  if (!force && G.squirrels.filter(s => s.state !== 'ko').length >= cap) return;
+  const fromLeft = Math.random() < 0.5;
+  const fat = G.heat >= 3 && Math.random() < 0.3;
+  G.squirrels.push({
+    x: fromLeft ? -30 : W + 30, y: rand(H * 0.4, H * 0.8),
+    state: 'seek', target: null, targetDog: null,
+    carrying: null, speed: (fat ? 95 : 150) * rand(0.9, 1.1),
+    fat, hp: fat ? 2 : 1, koT: 0, bobT: rand(0, TAU), staggerT: 0,
+  });
+}
+function bonkSquirrel(s, byTreat) {
+  if (s.staggerT > 0) return;
+  if (s.hp > 1) {
+    s.hp--; s.staggerT = 0.5;
+    sfx.thud();
+    addText(s.x, s.y - 24, 'TOUGH!', '#ffaa44', 14);
+    burst(s.x, s.y, 4, '#ffee88', 2, 'star');
+    return;
+  }
+  // real knockout
+  if (s.targetDog) { s.targetDog.taunted = false; s.targetDog.freeOpenT = 2; addText(s.targetDog.x, s.targetDog.y - 70, 'FREE WINDOW!', '#aaffaa', 15); }
+  if (s.carrying) {
+    // mid-theft bonk: drop the treat AND a golden acorn
+    const t = s.carrying; s.carrying = null;
+    t.state = 'ground'; t.groundT = GROUND_TTL; t.x = s.x; t.y = s.y;
+    G.treats.push(t);
+    G.treats.push({ x: s.x + rand(-22, 22), y: s.y + rand(6, 14), vx: 0, vy: 0, rot: 0, vrot: 0, state: 'ground', isAcorn: true, groundT: 12, groundY: s.y + 10, trail: [], scentT: 2 });
+    addText(s.x, s.y - 30, '🌟 GOLDEN ACORN!', '#ffd700', 20);
+    ringBurst(s.x, s.y, '#ffd700');
+    hitstop(0.05);
+  }
+  s.state = 'ko'; s.koT = 0.8;
+  sfx.boing();
+  burst(s.x, s.y, 8, '#ffee88', 2.5, 'star');
+  shake(3);
+  if (byTreat) {
+    chainUp();
+    const pts = 50 * CHAIN_STEPS[G.chainStep];
+    if (G.frenzyT > 0) G.score += pts; else G.unbanked += pts;
+    addText(s.x, s.y - 40, '+' + fmt(pts) + ' BONKED!', '#ffd700', 17);
+  }
+}
+function updateSquirrel(s, dt) {
+  s.bobT += dt * 12;
+  if (s.staggerT > 0) { s.staggerT -= dt; return; }
+  if (s.state === 'ko') {
+    s.koT -= dt;
+    s.x += (s.x < W / 2 ? -1 : 1) * 420 * dt;
+    if (s.koT <= 0 || s.x < -60 || s.x > W + 60) G.squirrels.splice(G.squirrels.indexOf(s), 1);
+    return;
+  }
+  // aura avoidance (fat squirrels barge straight through)
+  function move(tx, ty, sp) {
+    let dx = tx - s.x, dy = ty - s.y;
+    const dd = Math.hypot(dx, dy) || 1;
+    dx /= dd; dy /= dd;
+    if (!s.fat) {
+      for (const d of G.dogs) {
+        if (!d.guardian) continue;
+        const ad = dist(s.x, s.y, d.x, d.y);
+        if (ad < AURA_R + 26) {
+          // steer perpendicular around the aura
+          const px = -(d.y - s.y) / (ad || 1), py = (d.x - s.x) / (ad || 1);
+          const side = px * dx + py * dy >= 0 ? 1 : -1;
+          dx = dx * 0.25 + px * side * 0.75; dy = dy * 0.25 + py * side * 0.75;
+          const n = Math.hypot(dx, dy) || 1; dx /= n; dy /= n;
+        }
+      }
+    }
+    s.x += dx * sp * dt; s.y += dy * sp * dt;
+    return dd;
+  }
+
+  if (s.state === 'seek') {
+    // priority: golden acorns > grounded treats > taunt a dog
+    const grounded = G.treats.filter(t => t.state === 'ground' && !t.held);
+    const acorns = grounded.filter(t => t.isAcorn);
+    let tgt = null;
+    if (acorns.length) tgt = acorns.reduce((a, c) => dist(s.x, s.y, c.x, c.y) < dist(s.x, s.y, a.x, a.y) ? c : a);
+    else if (grounded.length) tgt = grounded.reduce((a, c) => dist(s.x, s.y, c.x, c.y) < dist(s.x, s.y, a.x, a.y) ? c : a);
+    if (tgt) {
+      s.target = tgt; s.targetDog = null;
+      const dd = move(tgt.x, tgt.y, s.speed * 1.25);
+      if (G.treats.indexOf(tgt) < 0 || tgt.state !== 'ground') { s.target = null; return; }
+      if (dd < 16) {
+        // grab it and run
+        removeTreat(tgt);
+        tgt.state = 'carried';
+        s.carrying = tgt; s.state = 'flee';
+      }
+      return;
+    }
+    // otherwise go taunt the juiciest feedable dog
+    if (!s.targetDog || s.targetDog.taunted || s.targetDog.guardian || G.dogs.indexOf(s.targetDog) < 0 || s.targetDog.leaving) {
+      const cands = feedables().filter(d => !d.taunted && !G.squirrels.some(q => q !== s && q.targetDog === d));
+      s.targetDog = cands.length ? pick(cands) : null;
+    }
+    if (s.targetDog) {
+      const d = s.targetDog;
+      const dd = move(d.x + 40, d.y + 10, s.speed);
+      if (dd < 52) { s.state = 'taunt'; d.taunted = true; sfx.tick(); addText(d.x, d.y - 70, '😵‍💫 DISTRACTED!', '#ff8866', 15); }
+    } else {
+      // wander
+      move(W / 2 + Math.sin(s.bobT * 0.2) * 200, H * 0.6, s.speed * 0.5);
+    }
+  } else if (s.state === 'taunt') {
+    const d = s.targetDog;
+    if (!d || G.dogs.indexOf(d) < 0 || d.guardian || d.leaving) { s.state = 'seek'; if (d) d.taunted = false; s.targetDog = null; return; }
+    // dance in front of the dog
+    s.x = d.x + 44 + Math.sin(s.bobT) * 6;
+    s.y = d.y + 8;
+    // acorns on the field lure taunters away
+    if (G.treats.some(t => t.state === 'ground' && t.isAcorn)) { d.taunted = false; s.targetDog = null; s.state = 'seek'; }
+  } else if (s.state === 'flee') {
+    const ex = s.x < W / 2 ? -50 : W + 50;
+    move(ex, s.y, s.speed * 1.35);
+    if (s.x < -40 || s.x > W + 40) {
+      G.squirrels.splice(G.squirrels.indexOf(s), 1);
+      if (s.carrying && !s.carrying.isAcorn) breakChain(clamp(s.x, 60, W - 60), s.y, 'stolen!');
+      else if (s.carrying && s.carrying.isAcorn) addText(W / 2, H * 0.5, 'ACORN LOST!', '#ffaa44', 20);
+    }
+  }
+}
+
+// ---------- particles / texts / coins ----------
+function burst(x, y, n, color, size, kind) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, TAU), sp = rand(60, 260);
+    G.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80, t: rand(0.4, 0.8), max: 0.8, color, size: size * rand(0.7, 1.4), kind: kind || 'dot', rot: rand(0, TAU), vr: rand(-8, 8) });
+  }
+}
+function ringBurst(x, y, color) {
+  G.parts.push({ x, y, t: 0.5, max: 0.5, color, kind: 'ring', size: 10 });
+}
+function confetti(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    G.parts.push({ x: x + rand(-20, 20), y: y + rand(-20, 20), vx: rand(-140, 140), vy: rand(-320, -80), t: rand(0.7, 1.2), max: 1.2, color: pick(TIER_COLORS), size: rand(3, 6), kind: 'confetti', rot: rand(0, TAU), vr: rand(-10, 10) });
+  }
+}
+function addText(x, y, str, color, size) {
+  G.texts.push({ x: clamp(x, 70, W - 70), y, str, color, size, t: 1.1, max: 1.1 });
+}
+function shake(m) { G.shake = Math.max(G.shake, m); }
+function hitstop(s) { G.hitstop = Math.max(G.hitstop, s); }
+function flash(col) { G.flashT = 0.3; G.flashCol = col; }
+
+// ---------- input ----------
+function pouchPos() { return { x: W / 2, y: H * 0.93 }; }
+function inPouchZone(x, y) { return y > H * 0.8; }
+// bounced treats are dead weight — they don't count against the throw budget
+function airCount() { return G.treats.filter(t => t.state === 'air' && !t.isAcorn && !t.bounced).length; }
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  audio();
+  const x = e.clientX, y = e.clientY;
+
+  if (G.state === 'title') { G.state = 'play'; return; }
+  if (G.state === 'over') {
+    if (G.gameOverT > 0.8) { resetGame(); G.state = 'play'; }
+    return;
+  }
+
+  // a second finger while aiming is always a tap — never corrupts the aim
+  if (G.aim && e.pointerId !== G.aim.pid) {
+    if (G.frenzyT > 0 && inPouchZone(x, y)) { frenzyFire(); return; }
+    tapAt(x, y);
+    return;
+  }
+
+  // frenzy: every tap in pouch zone fires an auto-aimed treat
+  if (G.frenzyT > 0 && inPouchZone(x, y)) { frenzyFire(); return; }
+
+  // mute button
+  if (x > W - 54 && y < 54) { muted = !muted; return; }
+
+  // pests take priority over everything — a thief standing on your acorn is still bonkable
+  if (tapAt(x, y)) return;
+
+  // pick up a grounded acorn to flick it
+  const acorn = G.treats.find(t => t.state === 'ground' && t.isAcorn && dist(x, y, t.x, t.y) < 44);
+  if (acorn) { acorn.held = true; G.aim = { sx: acorn.x, sy: acorn.y, mx: x, my: y, acorn, pid: e.pointerId }; return; }
+
+  if (inPouchZone(x, y)) {
+    if (airCount() >= MAX_AIRBORNE) {
+      addText(W / 2, H * 0.85, 'POUCH BUSY — ' + MAX_AIRBORNE + ' IN THE AIR!', '#ffffff', 15);
+      return;
+    }
+    const p = pouchPos();
+    G.aim = { sx: p.x, sy: p.y, mx: x, my: y, acorn: null, pid: e.pointerId };
+    return;
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (G.aim && e.pointerId === G.aim.pid) { G.aim.mx = e.clientX; G.aim.my = e.clientY; }
+});
+window.addEventListener('pointerup', e => {
+  if (!G.aim || e.pointerId !== G.aim.pid) return;
+  const a = G.aim; G.aim = null;
+  if (a.acorn) a.acorn.held = false;
+  if (G.state !== 'play') return;
+  const dx = a.mx - a.sx, dy = a.my - a.sy;
+  const len = Math.hypot(dx, dy);
+  if (len < 24 || dy > -6) return; // drag too small — just put it back down
+  let vx = dx * 4.5, vy = dy * 4.5;
+  const sp = clamp(Math.hypot(vx, vy), 400, maxLaunch());
+  const n = Math.hypot(vx, vy) || 1;
+  vx = vx / n * sp; vy = vy / n * sp;
+  if (a.acorn) {
+    // the world kept moving while we aimed — a thief may have won the race
+    if (G.treats.indexOf(a.acorn) < 0 || a.acorn.state !== 'ground') return;
+    removeTreat(a.acorn);
+    launchTreat(a.acorn.x, a.acorn.y, vx, vy, true);
+  } else {
+    if (airCount() >= MAX_AIRBORNE) { addText(a.sx, a.sy - 80, 'TOO MANY!', '#ffffff', 14); return; }
+    const p = pouchPos();
+    launchTreat(p.x, p.y - 20, vx, vy, false);
+  }
+});
+window.addEventListener('pointercancel', e => {
+  if (G.aim && e.pointerId === G.aim.pid) {
+    if (G.aim.acorn) G.aim.acorn.held = false;
+    G.aim = null;
+  }
+});
+function tapAt(x, y) {
+  // birds first (they're the flashier threat), then squirrels
+  for (const b of G.birds) {
+    if (b.state !== 'ko' && dist(x, y, b.x, b.y) < 44) {
+      koBird(b, false);
+      addText(b.x, b.y, 'SWATTED!', '#aaffaa', 15);
+      return true;
+    }
+  }
+  for (const s of G.squirrels) {
+    if (s.state !== 'ko' && dist(x, y, s.x, s.y) < 44) { bonkSquirrel(s, false); return true; }
+  }
+  return false;
+}
+function frenzyFire() {
+  const cands = feedables();
+  if (!cands.length) {
+    // nothing left to feed — still reward the taps so the banner never lies
+    G.score += 50;
+    addText(pouchPos().x, pouchPos().y - 70, 'SHOWTIME +50', '#ffd700', 15);
+    sfx.tick();
+    return;
+  }
+  const d = cands.reduce((a, c) => c.tier > a.tier ? c : a); // pump the biggest
+  const p = pouchPos(); const hp = headPos(d);
+  const T = 0.42;
+  const vx = (hp.x - p.x) / T;
+  const vy = (hp.y - (p.y - 20)) / T - 0.5 * GRAV * T;
+  launchTreat(p.x, p.y - 20, vx, vy, false);
+  sfx.tick();
+}
+
+// ---------- game over ----------
+function gameOver() {
+  if (G.state !== 'play') return;
+  G.biggestPileLost = Math.max(G.biggestPileLost, G.unbanked);
+  G.state = 'over'; G.gameOverT = 0;
+  G.graduates = G.dogs.filter(d => d.tier > 0 || d.guardian)
+    .sort((a, b) => a.tier - b.tier)
+    .map(d => ({ tier: d.tier, guardian: d.guardian, breed: d.breed, wag: rand(0, TAU) }));
+  if (G.score > G.best) {
+    G.best = G.score;
+    if (store) try { store.setItem('chompchain_best', G.best); } catch (e) {}
+  }
+}
+
+// ---------- update ----------
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  let rdt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+
+  // hitstop / slow-mo
+  if (G.hitstop > 0) { G.hitstop -= rdt; rdt = 0; }
+  if (G.slowT > 0) { G.slowT -= rdt; G.timeScale = 0.3; } else G.timeScale = 1;
+  const dt = rdt * G.timeScale;
+
+  if (G.state === 'play') update(dt);
+  if (G.state === 'over') G.gameOverT += rdt;
+
+  // visuals tick on real time
+  G.shake = Math.max(0, G.shake - rdt * 26);
+  if (G.flashT > 0) G.flashT -= rdt;
+  if (G.pileJit > 0) G.pileJit -= rdt * 2;
+  if (G.closeCallCd > 0) G.closeCallCd -= rdt;
+  for (const t of G.texts) t.t -= rdt;
+  G.texts = G.texts.filter(t => t.t > 0);
+  for (const p of G.parts) {
+    p.t -= rdt;
+    if (p.kind !== 'ring') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + 500 * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
+  }
+  G.parts = G.parts.filter(p => p.t > 0);
+  for (const c of G.coins) {
+    c.t -= rdt;
+    if (c.scatter) { c.x += c.vx * rdt; c.y += c.vy * rdt; c.vy += 900 * rdt; }
+    else if (c.toScore) { c.x = lerp(c.x, 60, 1 - Math.pow(0.0005, rdt)); c.y = lerp(c.y, 34, 1 - Math.pow(0.0005, rdt)); }
+  }
+  G.coins = G.coins.filter(c => c.t > 0);
+
+  draw();
+}
+function update(dt) {
+  G.t += dt;
+
+  // timers
+  for (const tm of G.timers) tm.t -= dt;
+  const due = G.timers.filter(tm => tm.t <= 0);
+  G.timers = G.timers.filter(tm => tm.t > 0);
+  due.forEach(tm => tm.fn());
+
+  // frenzy
+  if (G.frenzyT > 0) {
+    G.frenzyT -= dt;
+    if (G.frenzyT <= 0) endFrenzy();
+  }
+
+  // spawns
+  G.birdTimer -= dt;
+  if (G.birdTimer <= 0 && G.t > 8) {
+    spawnBird();
+    G.birdTimer = Math.max(4, 8 - 0.5 * G.heat) * rand(0.85, 1.15);
+  }
+  G.sqTimer -= dt;
+  if (G.sqTimer <= 0) {
+    spawnSquirrel();
+    // grounded acorns lure extra squirrels
+    if (G.treats.some(t => t.state === 'ground' && t.isAcorn) && G.squirrels.length < 5) spawnSquirrel(true);
+    G.sqTimer = Math.max(4, 9 - 0.6 * G.heat) * rand(0.85, 1.15);
+  }
+
+  for (const d of [...G.dogs]) updateDog(d, dt);
+  for (const t of [...G.treats]) updateTreat(t, dt);
+  for (const b of [...G.birds]) updateBird(b, dt);
+  for (const s of [...G.squirrels]) updateSquirrel(s, dt);
+}
+
+// ---------- drawing ----------
+function draw() {
+  cx.save();
+  if (G.shake > 0) cx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake));
+
+  drawYard();
+
+  // guardian auras under everything
+  for (const d of G.dogs) if (d.guardian) drawAura(d);
+
+  // grounded treats + shadows
+  for (const t of G.treats) if (t.state === 'ground') drawTreat(t);
+
+  // sort actors by y for pseudo-depth
+  const actors = [];
+  for (const d of G.dogs) actors.push({ y: d.y, f: () => drawDog(d) });
+  for (const s of G.squirrels) actors.push({ y: s.y, f: () => drawSquirrel(s) });
+  actors.sort((a, b) => a.y - b.y).forEach(a => a.f());
+
+  // airborne treats above ground actors
+  for (const t of G.treats) if (t.state === 'air') drawTreat(t);
+  for (const b of G.birds) drawBird(b);
+
+  // aiming preview
+  if (G.aim && G.state === 'play') drawAimArc();
+
+  drawPouch();
+  drawParticles();
+  drawHUD();
+
+  if (G.frenzyT > 0) { cx.fillStyle = 'rgba(255,215,0,0.10)'; cx.fillRect(-20, -20, W + 40, H + 40); }
+  if (G.flashT > 0 && G.flashCol) { cx.fillStyle = G.flashCol; cx.fillRect(-20, -20, W + 40, H + 40); }
+
+  if (G.state === 'title') drawTitle();
+  if (G.state === 'over') drawGameOver();
+  cx.restore();
+}
+
+function drawYard() {
+  // sky → grass gradient
+  const g = cx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#87ceeb'); g.addColorStop(0.18, '#a8d8a8');
+  g.addColorStop(0.55, '#5da95d'); g.addColorStop(1, '#3d7a3d');
+  cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+  // fence line
+  cx.fillStyle = '#8a6d47';
+  for (let x = 6; x < W; x += 34) {
+    cx.fillRect(x, H * 0.135, 10, H * 0.055);
+    cx.beginPath(); cx.moveTo(x, H * 0.135); cx.lineTo(x + 5, H * 0.12); cx.lineTo(x + 10, H * 0.135); cx.fill();
+  }
+  cx.fillRect(0, H * 0.15, W, 5);
+  // grass tufts (stable pseudo-random)
+  cx.strokeStyle = 'rgba(30,80,30,0.35)'; cx.lineWidth = 2;
+  for (let i = 0; i < 40; i++) {
+    const gx = ((i * 727) % 100) / 100 * W, gy = H * (0.25 + ((i * 331) % 100) / 100 * 0.6);
+    cx.beginPath(); cx.moveTo(gx, gy); cx.lineTo(gx - 3, gy - 7); cx.moveTo(gx, gy); cx.lineTo(gx + 3, gy - 8); cx.stroke();
+  }
+}
+
+function drawAura(d) {
+  const a = d.auraA;
+  const pulse = 1 + Math.sin(performance.now() / 400) * 0.03;
+  cx.beginPath(); cx.arc(d.x, d.y, AURA_R * a * pulse, 0, TAU);
+  cx.fillStyle = 'rgba(241,196,15,0.08)'; cx.fill();
+  cx.strokeStyle = 'rgba(241,196,15,0.45)'; cx.lineWidth = 2;
+  cx.setLineDash([8, 8]); cx.stroke(); cx.setLineDash([]);
+}
+
+function drawDog(d) {
+  const s = dogSize(d)
+    * (1 + (d.squash > 0 ? Math.sin(d.squash * Math.PI) * 0.15 : 0))
+    * (1 - (d.deflateT > 0 ? Math.sin(d.deflateT / 0.5 * Math.PI) * 0.12 : 0));
+  const hop = d.hopT > 0 ? -Math.sin(d.hopT / 0.3 * Math.PI) * 12 : 0;
+  const x = d.x, y = d.y + hop;
+  cx.save();
+  // shadow
+  cx.beginPath(); cx.ellipse(d.x, d.y + 18 * s, 40 * s, 10 * s, 0, 0, TAU);
+  cx.fillStyle = 'rgba(0,0,0,0.18)'; cx.fill();
+  // low-hunger desaturation cue
+  const low = !d.guardian && d.hunger < 0.25;
+  if (low) cx.globalAlpha = 0.75 + Math.sin(performance.now() / 180) * 0.15;
+  if (d.sadT > 0) cx.globalAlpha = 0.8;
+
+  // tail (wag speed rises with chain)
+  const wag = Math.sin(d.wagPhase) * 0.6;
+  cx.strokeStyle = d.breed; cx.lineWidth = 7 * s; cx.lineCap = 'round';
+  cx.beginPath(); cx.moveTo(x + 34 * s, y - 4 * s);
+  cx.quadraticCurveTo(x + 48 * s, y - 18 * s, x + (46 + wag * 14) * s, y - (30 + wag * 6) * s);
+  cx.stroke();
+
+  // body
+  cx.fillStyle = d.breed;
+  cx.beginPath(); cx.ellipse(x, y, 38 * s, 26 * s, 0, 0, TAU); cx.fill();
+  // legs
+  cx.fillRect(x - 26 * s, y + 10 * s, 9 * s, 16 * s);
+  cx.fillRect(x + 17 * s, y + 10 * s, 9 * s, 16 * s);
+
+  // head
+  const hx = x, hy = y - 34 * s, hr = 20 * s;
+  cx.beginPath(); cx.arc(hx, hy, hr, 0, TAU); cx.fill();
+  // floppy hound ears drooping from the sides
+  cx.fillStyle = shade(d.breed, 0.72);
+  cx.save();
+  cx.translate(hx - hr * 0.82, hy - hr * 0.25); cx.rotate(0.35);
+  cx.beginPath(); cx.ellipse(0, hr * 0.45, hr * 0.34, hr * 0.75, 0, 0, TAU); cx.fill();
+  cx.restore();
+  cx.save();
+  cx.translate(hx + hr * 0.82, hy - hr * 0.25); cx.rotate(-0.35);
+  cx.beginPath(); cx.ellipse(0, hr * 0.45, hr * 0.34, hr * 0.75, 0, 0, TAU); cx.fill();
+  cx.restore();
+  // muzzle
+  cx.fillStyle = shade(d.breed, 1.35);
+  cx.beginPath(); cx.ellipse(hx, hy + hr * 0.42, hr * 0.52, hr * 0.4, 0, 0, TAU); cx.fill();
+
+  // eyes
+  const blink = d.blinkT < 0;
+  if (d.taunted) {
+    // spiral eyes
+    cx.strokeStyle = '#333'; cx.lineWidth = 1.6 * s;
+    for (const ex of [-0.42, 0.42]) {
+      cx.beginPath();
+      for (let a = 0; a < TAU * 1.8; a += 0.4) {
+        const r = a * 0.9 * s;
+        const xx = hx + ex * hr + Math.cos(a + performance.now() / 200) * r;
+        const yy = hy - hr * 0.15 + Math.sin(a + performance.now() / 200) * r;
+        if (a === 0) cx.moveTo(xx, yy); else cx.lineTo(xx, yy);
+      }
+      cx.stroke();
+    }
+  } else if (G.frenzyT > 0) {
+    cx.fillStyle = '#e74c3c'; cx.font = `${Math.round(10 * s)}px sans-serif`; cx.textAlign = 'center';
+    cx.fillText('❤', hx - hr * 0.42, hy - hr * 0.05); cx.fillText('❤', hx + hr * 0.42, hy - hr * 0.05);
+  } else {
+    cx.fillStyle = '#222';
+    if (blink) {
+      cx.fillRect(hx - hr * 0.52, hy - hr * 0.2, hr * 0.28, 2);
+      cx.fillRect(hx + hr * 0.24, hy - hr * 0.2, hr * 0.28, 2);
+    } else {
+      // eyes track the aim
+      let ox = 0, oy = 0;
+      if (G.aim) { const a = Math.atan2(G.aim.my - hy, G.aim.mx - hx); ox = Math.cos(a) * 1.5 * s; oy = Math.sin(a) * 1.5 * s; }
+      cx.beginPath(); cx.arc(hx - hr * 0.4 + ox, hy - hr * 0.18 + oy, 2.6 * s, 0, TAU);
+      cx.arc(hx + hr * 0.4 + ox, hy - hr * 0.18 + oy, 2.6 * s, 0, TAU); cx.fill();
+    }
+  }
+
+  // snout + mouth
+  cx.fillStyle = '#2b2b2b';
+  cx.beginPath(); cx.ellipse(hx, hy + hr * 0.22, 4 * s, 3 * s, 0, 0, TAU); cx.fill();
+  const closingSoon = !d.mouthOpen && d.mouthT < 0.3 && !d.taunted && !d.guardian;
+  const wob = closingSoon ? Math.sin(performance.now() / 30) * 1.5 * s : 0;
+  if (d.mouthOpen && !d.guardian) {
+    cx.fillStyle = '#7a2f2f';
+    cx.beginPath(); cx.ellipse(hx, hy + hr * 0.62, 7.5 * s, 6.5 * s + Math.sin(performance.now() / 120) * s, 0, 0, TAU); cx.fill();
+    cx.fillStyle = '#ff9c9c';
+    cx.beginPath(); cx.ellipse(hx, hy + hr * 0.75, 4 * s, 3 * s, 0, 0, TAU); cx.fill();
+  } else {
+    cx.strokeStyle = '#2b2b2b'; cx.lineWidth = 2 * s;
+    cx.beginPath(); cx.moveTo(hx - 5 * s, hy + hr * 0.55 + wob); cx.quadraticCurveTo(hx, hy + hr * 0.7 + wob, hx + 5 * s, hy + hr * 0.55 + wob); cx.stroke();
+  }
+
+  // collar — the star of the show
+  const cy0 = hy + hr * 0.95;
+  const col = d.guardian ? '#f1c40f' : TIER_COLORS[d.tier];
+  cx.strokeStyle = d.flashT > 0 ? '#ffffff' : col;
+  cx.lineWidth = 6 * s;
+  cx.beginPath(); cx.arc(hx, cy0 - hr * 0.5, hr * 0.92, 0.25 * Math.PI, 0.75 * Math.PI); cx.stroke();
+  if (d.tier === 4 && !d.guardian) {
+    // stud dots preview
+    cx.fillStyle = '#ddd';
+    for (let i = 0; i < 4; i++) {
+      const a = 0.32 * Math.PI + i * 0.12 * Math.PI;
+      cx.beginPath(); cx.arc(hx + Math.cos(a) * hr * 0.92, cy0 - hr * 0.5 + Math.sin(a) * hr * 0.92, 1.8 * s, 0, TAU); cx.fill();
+    }
+  }
+  if (d.guardian || d.tier >= 5) {
+    // SPIKES — silver studs with a dark edge so they read as metal, not teeth
+    for (let i = 0; i < 6; i++) {
+      const a = 0.28 * Math.PI + i * 0.088 * Math.PI;
+      const bx = hx + Math.cos(a) * hr * 0.92, by = cy0 - hr * 0.5 + Math.sin(a) * hr * 0.92;
+      const nx = Math.cos(a), ny = Math.sin(a);
+      cx.beginPath();
+      cx.moveTo(bx - ny * 2.6 * s, by + nx * 2.6 * s);
+      cx.lineTo(bx + ny * 2.6 * s, by - nx * 2.6 * s);
+      cx.lineTo(bx + nx * 7 * s, by + ny * 7 * s);
+      cx.closePath();
+      cx.fillStyle = '#d8d8e0'; cx.fill();
+      cx.strokeStyle = '#777'; cx.lineWidth = 1; cx.stroke();
+    }
+    // glint
+    if (Math.sin(performance.now() / 300 + d.x) > 0.96) {
+      cx.fillStyle = '#fff';
+      cx.beginPath(); cx.arc(hx + hr * 0.5, cy0, 2.5 * s, 0, TAU); cx.fill();
+    }
+  }
+
+  cx.globalAlpha = 1;
+
+  // hunger bar + collar-progress bar above the head
+  if (!d.guardian && !d.leaving) {
+    const bw = 44;
+    const bx = hx - bw / 2, by = hy - hr - 22;
+    cx.fillStyle = 'rgba(0,0,0,0.3)'; cx.fillRect(bx - 1, by - 1, bw + 2, 8);
+    cx.fillStyle = d.hunger < 0.25 ? '#e74c3c' : d.hunger < 0.5 ? '#e67e22' : '#2ecc71';
+    cx.fillRect(bx, by, bw * clamp(d.hunger, 0, 1), 6);
+    cx.font = '10px sans-serif'; cx.textAlign = 'center';
+    cx.fillText('🦴', bx - 8, by + 7);
+    if (d.tier < 5) {
+      const lo = TIER_TREATS[d.tier], hi = TIER_TREATS[d.tier + 1];
+      const p = (d.treats - lo) / (hi - lo);
+      cx.fillStyle = 'rgba(0,0,0,0.3)'; cx.fillRect(bx - 1, by + 9, bw + 2, 5);
+      cx.fillStyle = TIER_COLORS[Math.min(5, d.tier + 1)];
+      cx.fillRect(bx, by + 10, bw * clamp(p, 0, 1), 3);
+    }
+  }
+  cx.restore();
+}
+
+function drawTreat(t) {
+  cx.save();
+  if (t.state === 'air') {
+    // comet trail
+    for (let i = 0; i < t.trail.length; i++) {
+      const p = t.trail[i];
+      cx.globalAlpha = (i / t.trail.length) * 0.35;
+      cx.fillStyle = t.isAcorn ? '#ffd700' : '#d2a24c';
+      cx.beginPath(); cx.arc(p.x, p.y, 3 + i * 0.5, 0, TAU); cx.fill();
+    }
+    cx.globalAlpha = 1;
+  }
+  if (t.state === 'ground') {
+    cx.beginPath(); cx.ellipse(t.x, t.y + 8, 12, 4, 0, 0, TAU);
+    cx.fillStyle = 'rgba(0,0,0,0.2)'; cx.fill();
+    // despawn ticking ring
+    if (!t.isAcorn) {
+      cx.strokeStyle = t.groundT < 1.5 ? 'rgba(255,80,80,0.8)' : 'rgba(255,255,255,0.5)';
+      cx.lineWidth = 2;
+      cx.beginPath(); cx.arc(t.x, t.y, 16, -Math.PI / 2, -Math.PI / 2 + TAU * (t.groundT / GROUND_TTL)); cx.stroke();
+    } else {
+      // acorn scent ping
+      const ping = (performance.now() / 2000) % 1;
+      cx.strokeStyle = `rgba(255,215,0,${0.6 * (1 - ping)})`; cx.lineWidth = 2;
+      cx.beginPath(); cx.arc(t.x, t.y, 14 + ping * 30, 0, TAU); cx.stroke();
+    }
+  }
+  cx.translate(t.x, t.y); cx.rotate(t.rot);
+  cx.font = t.isAcorn ? '26px sans-serif' : '22px sans-serif';
+  cx.textAlign = 'center'; cx.textBaseline = 'middle';
+  if (t.isAcorn) {
+    cx.shadowColor = '#ffd700'; cx.shadowBlur = 14;
+    cx.fillText('🌰', 0, 0);
+    cx.shadowBlur = 0;
+    cx.font = '11px sans-serif'; cx.fillText('✨', 8, -10);
+  } else {
+    cx.fillText('🦴', 0, 0);
+  }
+  cx.restore();
+}
+
+function drawBird(b) {
+  cx.save();
+  // dive telegraph: growing ground shadow
+  if (b.state === 'tele' && b.target) {
+    const p = 1 - b.teleT / 0.7;
+    cx.beginPath(); cx.ellipse(b.target.x, Math.min(b.target.groundY, H * 0.86), 18 * p + 6, 6 * p + 2, 0, 0, TAU);
+    cx.fillStyle = `rgba(0,0,0,${0.25 * p})`; cx.fill();
+  }
+  cx.translate(b.x, b.y);
+  if (b.state === 'ko') cx.rotate(b.koT * 12);
+  const flap = Math.sin(b.flap) * 0.7;
+  const bodyC = b.magpie ? '#222831' : '#5b8db8';
+  const wingC = b.magpie ? '#eeeeee' : '#3a6b96';
+  // wings
+  cx.fillStyle = wingC;
+  cx.beginPath(); cx.moveTo(-4, 0); cx.lineTo(-20, -10 - flap * 12); cx.lineTo(-12, 2); cx.closePath(); cx.fill();
+  cx.beginPath(); cx.moveTo(4, 0); cx.lineTo(20, -10 - flap * 12); cx.lineTo(12, 2); cx.closePath(); cx.fill();
+  // body
+  cx.fillStyle = bodyC;
+  cx.beginPath(); cx.ellipse(0, 0, 13, 9, 0, 0, TAU); cx.fill();
+  // head + beak
+  cx.beginPath(); cx.arc(b.dir * 10, -4, 6, 0, TAU); cx.fill();
+  cx.fillStyle = '#f0a500';
+  cx.beginPath(); cx.moveTo(b.dir * 15, -4); cx.lineTo(b.dir * 23, -2); cx.lineTo(b.dir * 15, 0); cx.closePath(); cx.fill();
+  // eye
+  cx.fillStyle = '#fff'; cx.beginPath(); cx.arc(b.dir * 11, -5, 2, 0, TAU); cx.fill();
+  cx.fillStyle = '#000'; cx.beginPath(); cx.arc(b.dir * 11.5, -5, 1, 0, TAU); cx.fill();
+  // carried loot + lost multiplier tag
+  if (b.carrying) {
+    cx.font = '18px sans-serif'; cx.textAlign = 'center';
+    cx.fillText(b.carrying.isAcorn ? '🌰' : '🦴', 0, 14);
+    cx.fillStyle = '#ff5555'; cx.font = 'bold 13px sans-serif';
+    cx.fillText('×' + b.stealMult + '!', 0, -18);
+  }
+  cx.restore();
+}
+
+function drawSquirrel(s) {
+  cx.save();
+  cx.translate(s.x, s.y);
+  const bob = Math.sin(s.bobT) * 2;
+  if (s.state === 'ko') cx.scale(1, 0.3);
+  if (s.state === 'taunt') { cx.rotate(Math.sin(s.bobT) * 0.25); cx.translate(0, -Math.abs(Math.sin(s.bobT)) * 6); }
+  if (s.staggerT > 0) cx.rotate(Math.sin(s.staggerT * 40) * 0.15);
+  const sc = s.fat ? 1.45 : 1;
+  cx.scale(sc, sc);
+  const bodyC = s.fat ? '#6d4423' : '#a0622d';
+  // tail
+  cx.strokeStyle = bodyC; cx.lineWidth = 8; cx.lineCap = 'round';
+  cx.beginPath(); cx.moveTo(-8, 2 + bob * 0.4);
+  cx.quadraticCurveTo(-20, -8, -16, -18 + bob);
+  cx.stroke();
+  // body
+  cx.fillStyle = bodyC;
+  cx.beginPath(); cx.ellipse(0, 2, 11, 8, 0, 0, TAU); cx.fill();
+  // head
+  cx.beginPath(); cx.arc(8, -4 + bob * 0.3, 6, 0, TAU); cx.fill();
+  // ear
+  cx.beginPath(); cx.arc(6, -10 + bob * 0.3, 2.4, 0, TAU); cx.fill();
+  // eye
+  cx.fillStyle = '#fff'; cx.beginPath(); cx.arc(9.5, -5 + bob * 0.3, 2, 0, TAU); cx.fill();
+  cx.fillStyle = '#000'; cx.beginPath(); cx.arc(10, -5 + bob * 0.3, 1, 0, TAU); cx.fill();
+  // carrying loot
+  if (s.carrying) {
+    cx.font = '15px sans-serif'; cx.textAlign = 'center';
+    cx.fillText(s.carrying.isAcorn ? '🌰' : '🦴', 12, -12);
+  }
+  if (s.fat) { cx.fillStyle = '#fff'; cx.font = 'bold 9px sans-serif'; cx.textAlign = 'center'; cx.fillText(s.hp > 1 ? '••' : '•', 0, 5); }
+  if (s.state === 'taunt') { cx.font = '12px sans-serif'; cx.fillText('😝', 8, -16); }
+  cx.restore();
+}
+
+function drawAimArc() {
+  const a = G.aim;
+  const dx = a.mx - a.sx, dy = a.my - a.sy;
+  if (Math.hypot(dx, dy) < 24 || dy > -6) return;
+  let vx = dx * 4.5, vy = dy * 4.5;
+  const sp = clamp(Math.hypot(vx, vy), 400, maxLaunch());
+  const n = Math.hypot(vx, vy) || 1;
+  vx = vx / n * sp; vy = vy / n * sp;
+  let x = a.acorn ? a.sx : pouchPos().x, y = (a.acorn ? a.sy : pouchPos().y - 20);
+  let simVx = vx, simVy = vy;
+  // integrate at the same fine step the game uses so the dots match real flight
+  const step = 1 / 60;
+  cx.fillStyle = 'rgba(255,255,255,0.75)';
+  let dots = 0;
+  for (let i = 1; i <= 84 && dots < 12; i++) {
+    simVy += GRAV * step;
+    x += simVx * step; y += simVy * step;
+    if (i % 7 === 0) {
+      cx.globalAlpha = 0.8 - dots * 0.055;
+      cx.beginPath(); cx.arc(x, y, 4 - dots * 0.15, 0, TAU); cx.fill();
+      dots++;
+    }
+  }
+  cx.globalAlpha = 1;
+  // power hint
+  cx.fillStyle = sp > 900 ? '#ffcc44' : '#ffffff';
+  cx.font = 'bold 12px sans-serif'; cx.textAlign = 'center';
+  cx.fillText(sp > 900 ? 'FAST!' : 'lob', a.mx, a.my - 18);
+}
+
+function drawPouch() {
+  const p = pouchPos();
+  cx.save();
+  // pouch zone hint
+  cx.fillStyle = 'rgba(0,0,0,0.10)';
+  cx.fillRect(0, H * 0.8, W, H * 0.2);
+  cx.strokeStyle = 'rgba(255,255,255,0.15)'; cx.setLineDash([6, 10]);
+  cx.beginPath(); cx.moveTo(0, H * 0.8); cx.lineTo(W, H * 0.8); cx.stroke(); cx.setLineDash([]);
+  // pouch
+  const jig = G.frenzyT > 0 ? Math.sin(performance.now() / 50) * 3 : 0;
+  cx.fillStyle = '#8B4513';
+  cx.beginPath(); cx.ellipse(p.x + jig, p.y, 46, 26, 0, 0, TAU); cx.fill();
+  cx.fillStyle = '#A0522D';
+  cx.beginPath(); cx.ellipse(p.x + jig, p.y - 10, 40, 14, 0, 0, TAU); cx.fill();
+  cx.font = '24px sans-serif'; cx.textAlign = 'center';
+  cx.fillText('🦴', p.x + jig - 12, p.y - 6);
+  cx.fillText('🦴', p.x + jig + 10, p.y - 2);
+  if (G.state === 'play' && (G.t < 8 || (!G.fedOnce && G.t < 25)) && !G.aim) {
+    cx.fillStyle = 'rgba(255,255,255,0.9)'; cx.font = 'bold 15px sans-serif';
+    cx.fillText('⬆ DRAG UP FROM HERE TO FLICK TREATS', p.x, p.y - 46);
+  }
+  if (G.frenzyT > 0) {
+    cx.fillStyle = '#ffd700'; cx.font = 'bold 16px sans-serif';
+    cx.fillText('TAP HERE!! ' + G.frenzyT.toFixed(1) + 's', p.x, p.y - 46);
+  }
+  cx.restore();
+}
+
+function drawParticles() {
+  for (const p of G.parts) {
+    const a = clamp(p.t / p.max, 0, 1);
+    cx.globalAlpha = a;
+    if (p.kind === 'ring') {
+      cx.strokeStyle = p.color; cx.lineWidth = 4 * a;
+      cx.beginPath(); cx.arc(p.x, p.y, p.size + (1 - a) * 90, 0, TAU); cx.stroke();
+    } else if (p.kind === 'confetti') {
+      cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot);
+      cx.fillStyle = p.color; cx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+      cx.restore();
+    } else if (p.kind === 'feather') {
+      cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot);
+      cx.fillStyle = p.color;
+      cx.beginPath(); cx.ellipse(0, 0, p.size * 2.4, p.size, 0, 0, TAU); cx.fill();
+      cx.restore();
+    } else if (p.kind === 'star') {
+      cx.fillStyle = p.color; cx.font = `${Math.round(p.size * 5)}px sans-serif`; cx.textAlign = 'center';
+      cx.fillText('✦', p.x, p.y);
+    } else {
+      cx.fillStyle = p.color;
+      cx.beginPath(); cx.arc(p.x, p.y, p.size, 0, TAU); cx.fill();
+    }
+  }
+  cx.globalAlpha = 1;
+  // coins
+  for (const c of G.coins) {
+    cx.fillStyle = '#ffd700'; cx.strokeStyle = '#b8860b'; cx.lineWidth = 1.5;
+    cx.beginPath(); cx.arc(c.x, c.y, 6, 0, TAU); cx.fill(); cx.stroke();
+  }
+  // floating texts
+  for (const t of G.texts) {
+    const a = clamp(t.t / t.max, 0, 1);
+    const rise = (1 - a) * 34;
+    cx.globalAlpha = Math.min(1, a * 2);
+    cx.font = `bold ${t.size}px sans-serif`; cx.textAlign = 'center';
+    cx.strokeStyle = 'rgba(0,0,0,0.6)'; cx.lineWidth = 4;
+    cx.strokeText(t.str, t.x, t.y - rise);
+    cx.fillStyle = t.color;
+    cx.fillText(t.str, t.x, t.y - rise);
+  }
+  cx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  if (G.state === 'title') return;
+  cx.save();
+  // score
+  cx.font = 'bold 26px sans-serif'; cx.textAlign = 'left';
+  cx.strokeStyle = 'rgba(0,0,0,0.5)'; cx.lineWidth = 4;
+  cx.strokeText('🪙 ' + fmt(G.score), 20, 42);
+  cx.fillStyle = '#fff';
+  cx.fillText('🪙 ' + fmt(G.score), 20, 42);
+
+  // unbanked pile — jitters harder as it grows
+  if (G.unbanked > 0) {
+    const jit = (G.pileJit > 0 ? 3 : 1) * Math.min(4, G.unbanked / 800);
+    const jx = rand(-jit, jit), jy = rand(-jit, jit);
+    const stack = clamp(Math.round(G.unbanked / 300), 1, 8);
+    for (let i = 0; i < stack; i++) {
+      cx.fillStyle = '#ffd700'; cx.strokeStyle = '#b8860b'; cx.lineWidth = 1.5;
+      cx.beginPath(); cx.ellipse(pileX() + jx, pileY() - i * 5 + jy, 15, 6, 0, 0, TAU); cx.fill(); cx.stroke();
+    }
+    cx.font = 'bold 17px sans-serif';
+    cx.strokeStyle = 'rgba(0,0,0,0.5)'; cx.lineWidth = 3;
+    const label = '+' + fmt(G.unbanked) + '  ×' + CHAIN_STEPS[G.chainStep];
+    cx.strokeText(label, pileX() + 26 + jx, pileY() + 4 + jy);
+    cx.fillStyle = '#ffe28a';
+    cx.fillText(label, pileX() + 26 + jx, pileY() + 4 + jy);
+    cx.font = '11px sans-serif'; cx.fillStyle = 'rgba(255,255,255,0.7)';
+    cx.fillText('UNBANKED — tier-up a collar to bank!', pileX() - 20, pileY() + 22);
+  } else if (G.chainStep > 0) {
+    cx.font = 'bold 17px sans-serif'; cx.fillStyle = '#ffe28a';
+    cx.fillText('chain ×' + CHAIN_STEPS[G.chainStep], pileX() - 20, pileY() + 4);
+  }
+
+  // lives (bones)
+  cx.font = '22px sans-serif';
+  for (let i = 0; i < 3; i++) {
+    cx.globalAlpha = i < 3 - G.dogsLost ? 1 : 0.22;
+    cx.fillText('🦴', 20 + i * 30, 138);
+  }
+  cx.globalAlpha = 1;
+
+  // heat
+  if (G.heat > 0) {
+    cx.font = 'bold 16px sans-serif'; cx.textAlign = 'right';
+    cx.fillStyle = '#ff7744';
+    cx.fillText('🔥 HEAT ' + G.heat, W - 66, 40);
+  }
+  // mute
+  cx.font = '22px sans-serif'; cx.textAlign = 'right';
+  cx.fillText(muted ? '🔇' : '🔊', W - 20, 40);
+  cx.restore();
+}
+
+function drawTitle() {
+  cx.fillStyle = 'rgba(10,25,10,0.72)'; cx.fillRect(0, 0, W, H);
+  cx.textAlign = 'center';
+  cx.font = 'bold 15px sans-serif'; cx.fillStyle = '#8fd18f';
+  cx.fillText('🦴  T R E A T   Y A R D   T Y C O O N  🦴', W / 2, H * 0.24);
+  cx.font = `bold ${Math.min(64, W * 0.09)}px sans-serif`;
+  cx.fillStyle = '#ffd700';
+  cx.strokeStyle = 'rgba(0,0,0,0.6)'; cx.lineWidth = 6;
+  cx.strokeText('CHOMP CHAIN', W / 2, H * 0.33);
+  cx.fillText('CHOMP CHAIN', W / 2, H * 0.33);
+
+  cx.font = '16px sans-serif'; cx.fillStyle = '#fff';
+  const lines = [
+    '🦴 Drag up from the pouch to FLICK treats into open mouths',
+    '🐶 Treats grow your dogs — collars tier up: red → orange → green → blue → purple',
+    '🏆 Fully grown dogs earn SPIKED COLLARS and guard the yard with auras',
+    '🐦 Birds snatch treats mid-air · 🐿 Squirrels steal & distract — TAP to bonk them!',
+    '💰 Points stay UNBANKED until a collar tiers up. Get greedy... but not too greedy.',
+    '🌰 Bonk a thieving squirrel mid-heist for a GOLDEN ACORN (instant tier!)',
+  ];
+  lines.forEach((l, i) => cx.fillText(l, W / 2, H * 0.44 + i * 30));
+
+  const pulse = 1 + Math.sin(performance.now() / 300) * 0.06;
+  cx.font = `bold ${Math.round(28 * pulse)}px sans-serif`;
+  cx.fillStyle = '#8fff8f';
+  cx.fillText('TAP TO START', W / 2, H * 0.78);
+  if (G.best > 0) {
+    cx.font = '15px sans-serif'; cx.fillStyle = '#ffd700';
+    cx.fillText('BEST: ' + fmt(G.best), W / 2, H * 0.85);
+  }
+}
+
+function drawGameOver() {
+  const a = Math.min(1, G.gameOverT * 1.5);
+  cx.fillStyle = `rgba(10,20,10,${0.8 * a})`; cx.fillRect(0, 0, W, H);
+  if (a < 0.5) return;
+  cx.textAlign = 'center';
+  cx.font = `bold ${Math.min(52, W * 0.08)}px sans-serif`;
+  cx.fillStyle = '#ffd700';
+  cx.fillText(G.won ? '🏆 YARD MASTERED! 🏆' : 'YARD OVERRUN!', W / 2, H * 0.2);
+
+  cx.font = 'bold 30px sans-serif'; cx.fillStyle = '#fff';
+  cx.fillText('BANKED  ' + fmt(G.score), W / 2, H * 0.3);
+  cx.font = '17px sans-serif'; cx.fillStyle = '#cfe8cf';
+  cx.fillText('Best Chain  ×' + G.bestChain + '      Spiked Collars  ' + G.spikedCount, W / 2, H * 0.36);
+  if (G.biggestPileLost > 0) {
+    cx.fillStyle = '#ff8888';
+    cx.fillText('You left ' + fmt(G.biggestPileLost) + ' on the table... 💸', W / 2, H * 0.42);
+  }
+  if (G.score >= G.best && G.score > 0) {
+    cx.fillStyle = '#ffd700'; cx.font = 'bold 19px sans-serif';
+    cx.fillText('★ NEW BEST! ★', W / 2, H * 0.475);
+  } else if (G.best > 0) {
+    cx.fillStyle = '#aaa'; cx.fillText('Best: ' + fmt(G.best), W / 2, H * 0.475);
+  }
+
+  // parade of graduates, biggest last
+  const py = H * 0.6;
+  const gs = G.graduates;
+  if (gs.length) {
+    cx.font = '14px sans-serif'; cx.fillStyle = '#8fd18f';
+    cx.fillText('— your good dogs —', W / 2, py - 70);
+    const gap = Math.min(110, (W - 100) / gs.length);
+    const x0 = W / 2 - (gs.length - 1) * gap / 2;
+    gs.forEach((g, i) => {
+      const s = (1 + 0.24 * g.tier) * 0.6;
+      const x = x0 + i * gap, y = py;
+      const wag = Math.sin(performance.now() / 150 + g.wag) * 0.6;
+      cx.strokeStyle = g.breed; cx.lineWidth = 5 * s; cx.lineCap = 'round';
+      cx.beginPath(); cx.moveTo(x + 30 * s, y); cx.quadraticCurveTo(x + 44 * s, y - 14 * s, x + (42 + wag * 12) * s, y - 26 * s); cx.stroke();
+      cx.fillStyle = g.breed;
+      cx.beginPath(); cx.ellipse(x, y, 34 * s, 23 * s, 0, 0, TAU); cx.fill();
+      const hy2 = y - 30 * s, hr2 = 18 * s;
+      cx.beginPath(); cx.arc(x, hy2, hr2, 0, TAU); cx.fill();
+      cx.strokeStyle = g.guardian ? '#f1c40f' : TIER_COLORS[g.tier];
+      cx.lineWidth = 5 * s;
+      cx.beginPath(); cx.arc(x, hy2 + hr2 * 0.45, hr2 * 0.92, 0.25 * Math.PI, 0.75 * Math.PI); cx.stroke();
+      if (g.guardian) {
+        cx.fillStyle = '#eee';
+        for (let k = 0; k < 5; k++) {
+          const ang = 0.3 * Math.PI + k * 0.1 * Math.PI;
+          const bx2 = x + Math.cos(ang) * hr2 * 0.92, by2 = hy2 + hr2 * 0.45 + Math.sin(ang) * hr2 * 0.92;
+          cx.beginPath(); cx.moveTo(bx2 - 3 * s, by2); cx.lineTo(bx2 + 3 * s, by2); cx.lineTo(bx2 + Math.cos(ang) * 7 * s, by2 + Math.sin(ang) * 7 * s); cx.closePath(); cx.fill();
+        }
+      }
+      cx.fillStyle = '#222';
+      cx.beginPath(); cx.arc(x - hr2 * 0.35, hy2 - 2, 2 * s, 0, TAU); cx.arc(x + hr2 * 0.35, hy2 - 2, 2 * s, 0, TAU); cx.fill();
+    });
+  }
+
+  if (G.gameOverT > 0.8) {
+    const pulse = 1 + Math.sin(performance.now() / 250) * 0.05;
+    cx.fillStyle = '#2ecc71';
+    const bw = 260 * pulse, bh = 64 * pulse;
+    cx.beginPath();
+    if (cx.roundRect) cx.roundRect(W / 2 - bw / 2, H * 0.78 - bh / 2, bw, bh, 16);
+    else cx.rect(W / 2 - bw / 2, H * 0.78 - bh / 2, bw, bh);
+    cx.fill();
+    cx.fillStyle = '#fff'; cx.font = `bold ${Math.round(26 * pulse)}px sans-serif`;
+    cx.fillText('PLAY AGAIN', W / 2, H * 0.78 + 9);
+  }
+}
+
+// pause when tab hidden
+document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+// debug/test hook
+window.CHOMP = G;
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
