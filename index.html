@@ -150,7 +150,7 @@ function resetGame() {
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
   G.pileJit = 0; G.flashT = 0; G.flashCol = null;
   G.pouchKick = 0;
-  G.closeCallCd = 0;
+  G.closeCallCd = 0; G.runCloseCalls = 0;
   G.gameOverT = 0; G.graduates = [];
   // starting roster: near + both mid slots (far row unlocks as you play)
   spawnDog(6); spawnDog(3); spawnDog(4);
@@ -459,6 +459,7 @@ function updateTreat(t, dt) {
       const hp = headPos(d);
       if (dist(t.x, t.y, hp.x, hp.y) < catchR(d)) {
         if (d.mouthOpen || t.isAcorn) {
+          if (t.closeCalled && !t.isAcorn) closeCallBonus(t, hp);
           feedDog(d, t.isAcorn);
           removeTreat(t);
         } else if (t.vy > -50) {
@@ -506,6 +507,18 @@ function updateTreat(t, dt) {
   }
 }
 function removeTreat(t) { const i = G.treats.indexOf(t); if (i >= 0) G.treats.splice(i, 1); }
+// a treat that survived a diving beak by inches and still got eaten — celebrate it
+function closeCallBonus(t, hp) {
+  const bonus = 250 * CHAIN_STEPS[G.chainStep];
+  if (G.frenzyT > 0) G.score += bonus; else G.unbanked += bonus;
+  G.runCloseCalls++;
+  G.slowT = 0.35; hitstop(0.05);
+  ringBurst(hp.x, hp.y, '#ffffff');
+  addText(hp.x, hp.y - 55, 'CLOSE ONE! +' + fmt(bonus), '#aaffff', 22);
+  tone(660, 0.15, 'sine', 0.12, 1320);
+  tone(880, 0.1, 'square', 0.07, null, 0.08);
+  G.closeCallCd = 3;
+}
 function inAnyAura(x, y) {
   return G.dogs.some(d => d.guardian && dist(x, y, d.x, d.y) < AURA_R);
 }
@@ -1542,7 +1555,7 @@ function drawGameOver() {
   cx.font = 'bold 30px sans-serif'; cx.fillStyle = '#fff';
   cx.fillText('BANKED  ' + fmt(G.score), W / 2, H * 0.3);
   cx.font = '17px sans-serif'; cx.fillStyle = '#cfe8cf';
-  cx.fillText('Best Chain  ×' + G.bestChain + '      Spiked Collars  ' + G.spikedCount, W / 2, H * 0.36);
+  cx.fillText('Best Chain  ×' + G.bestChain + '      Spiked Collars  ' + G.spikedCount + (G.runCloseCalls ? '      Close Calls  ' + G.runCloseCalls : ''), W / 2, H * 0.36);
   if (G.biggestPileLost > 0) {
     cx.fillStyle = '#ff8888';
     cx.fillText('You left ' + fmt(G.biggestPileLost) + ' on the table... 💸', W / 2, H * 0.42);
