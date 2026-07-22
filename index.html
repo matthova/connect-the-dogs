@@ -190,6 +190,8 @@ function resetGame() {
   G.wind = 0; G.windT = 0; G.windDir = 1; G.windTimer = 40; G.leafAcc = 0;
   G.shroom = null; G.shroomTimer = 45;
   G.bonkCount = 0;
+  G.shield = false; G.tierUps = 0; G.shieldsUsed = 0;
+  G.dareT = 0; G.dareUsed = false;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
@@ -399,6 +401,12 @@ function tierUp(d) {
   zoomPunch(hp.x, hp.y, 1.06, 0.3);
   bank();
   addText(d.x, d.y - 100, TIER_NAMES[d.tier] + ' COLLAR!', TIER_COLORS[d.tier], 22);
+  G.tierUps++;
+  if (G.tierUps % 3 === 0 && !G.shield) {
+    G.shield = true;
+    addText(W / 2, H * 0.28, '🛡 BANK SHIELD EARNED!', '#66ccff', 22);
+    sfx.bell();
+  }
   if (d.tier >= 5) becomeGuardian(d);
 }
 
@@ -491,6 +499,18 @@ function breakChain(x, y, reason, soft) {
     sfx.tick();
     return;
   }
+  // shield: one hard shatter absorbed, pile kept, chain resets
+  if (G.shield && G.unbanked > 0) {
+    G.shield = false; G.shieldsUsed++;
+    G.chainStep = 0;
+    G.dareT = 0; G.dareUsed = false;
+    addText(W / 2, H * 0.3, '🛡 SHIELD SAVED YOUR PILE!', '#66ccff', 24);
+    flash('#66ccff22');
+    ringBurst(pileX(), pileY(), '#66ccff');
+    tone(880, 0.2, 'sine', 0.12, 440);
+    if (reason) addText(x, y, reason, '#ff8866', 15);
+    return;
+  }
   G.biggestPileLost = Math.max(G.biggestPileLost, G.unbanked);
   if (G.unbanked > 0) {
     sfx.shatter();
@@ -507,10 +527,18 @@ function breakChain(x, y, reason, soft) {
   if (reason) addText(x, y, reason, '#ff8866', 15);
   G.unbanked = 0;
   G.chainStep = 0;
+  G.dareT = 0; G.dareUsed = false;
 }
 function bank() {
   if (G.unbanked <= 0) return;
-  const amt = G.unbanked;
+  let amt = G.unbanked;
+  if (G.dareT > 0) {
+    amt *= 2;
+    addText(pileX() + 90, pileY() - 26, '🎲 DARE WON! ×2', '#ff88ff', 24);
+    confetti(pileX(), pileY(), 20);
+    G.dareT = 0;
+  }
+  G.dareUsed = false;
   G.score += amt; G.unbanked = 0;
   // relief resolve — exhale after the heartbeat
   tone(523, 0.15, 'sine', 0.1);
@@ -1109,6 +1137,14 @@ cv.addEventListener('pointerdown', e => {
   // mute button
   if (x > W - 54 && y < 54) { muted = !muted; return; }
 
+  // dice button: double-or-nothing on the current pile
+  if (G.unbanked >= 1200 && G.dareT <= 0 && !G.dareUsed && G.frenzyT <= 0 && dist(x, y, pileX() + 175, pileY() - 4) < 34) {
+    G.dareT = 9; G.dareUsed = true;
+    addText(W / 2, H * 0.3, '🎲 DOUBLE OR NOTHING! TIER UP IN 9s!', '#ff88ff', 24);
+    sfx.bell(); shake(4);
+    return;
+  }
+
   // pests take priority over everything — a thief standing on your acorn is still bonkable
   if (tapAt(x, y)) return;
 
@@ -1295,6 +1331,17 @@ function update(dt) {
     if (G.frenzyT <= 0) endFrenzy();
   }
   if (G.dreadT > 0) G.dreadT -= dt;
+
+  // double-or-nothing dare: 9s to tier-up or the pile shatters; pests smell blood
+  if (G.dareT > 0) {
+    const prevDare = G.dareT;
+    G.dareT -= dt;
+    if (Math.ceil(Math.max(0, G.dareT)) < Math.ceil(prevDare)) {
+      tone(400 + (9 - Math.max(0, G.dareT)) * 60, 0.08, 'square', 0.07);
+    }
+    G.birdTimer -= dt * 0.5; G.sqTimer -= dt * 0.5;
+    if (G.dareT <= 0) breakChain(pileX() + 60, pileY() + 50, 'DARE LOST!');
+  }
 
   // gust fronts: telegraph 2s, ramp 1s, hold 7s, ramp out 1s
   G.windTimer -= dt;
@@ -1951,6 +1998,24 @@ function drawHUD() {
     cx.fillText(label, pileX() + 26 + jx, pileY() + 4 + jy);
     cx.font = '11px sans-serif'; cx.fillStyle = 'rgba(255,255,255,0.7)';
     cx.fillText('UNBANKED — tier-up a collar to bank!', pileX() - 20, pileY() + 22);
+    // shield held
+    if (G.shield) {
+      cx.font = `${Math.round(18 + Math.sin(performance.now() / 250) * 2)}px sans-serif`;
+      cx.fillText('🛡', pileX() - 34, pileY() + 6);
+    }
+    // dare: dice offer / countdown ring
+    if (G.dareT > 0) {
+      cx.strokeStyle = '#ff5577'; cx.lineWidth = 4;
+      cx.beginPath(); cx.arc(pileX(), pileY() - 4, 30, -Math.PI / 2, -Math.PI / 2 + TAU * (G.dareT / 9)); cx.stroke();
+      cx.font = 'bold 15px sans-serif'; cx.fillStyle = '#ff88aa';
+      cx.fillText('🎲 ' + G.dareT.toFixed(1) + 's — TIER UP OR LOSE IT', pileX() + 46, pileY() - 22);
+    } else if (G.unbanked >= 1200 && !G.dareUsed && G.frenzyT <= 0) {
+      const dp = 1 + Math.sin(performance.now() / 200) * 0.15;
+      cx.font = `${Math.round(26 * dp)}px sans-serif`;
+      cx.fillText('🎲', pileX() + 168, pileY() + 5);
+      cx.font = 'bold 10px sans-serif'; cx.fillStyle = '#ff88ff';
+      cx.fillText('×2?', pileX() + 190, pileY() + 5);
+    }
   } else if (G.chainStep > 0) {
     cx.font = 'bold 17px sans-serif'; cx.fillStyle = '#ffe28a';
     cx.fillText('chain ×' + CHAIN_STEPS[G.chainStep], pileX() - 20, pileY() + 4);
