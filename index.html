@@ -56,6 +56,11 @@ const shade = (hex, f) => { // darken/lighten a #rrggbb color by factor f
   const ch = s => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
   return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
 };
+const mixHex = (a, b, t) => {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const ch = s => Math.round(((pa >> s) & 255) + (((pb >> s) & 255) - ((pa >> s) & 255)) * t);
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+};
 
 // ---------- constants ----------
 const GRAV = 1800;
@@ -140,7 +145,7 @@ function mtone(freq, dur, type, vol, at) {
   o.start(at); o.stop(at + dur + 0.02);
 }
 function musicTick() {
-  if (!AC || muted || G.state !== 'play') { MUSIC.next = 0; return; }
+  if (!AC || muted || G.state !== 'play' || document.hidden) { MUSIC.next = 0; return; }
   if (MUSIC.next < AC.currentTime) MUSIC.next = AC.currentTime + 0.05;
   while (MUSIC.next < AC.currentTime + 0.12) {
     scheduleStep(MUSIC.step, MUSIC.next);
@@ -167,6 +172,12 @@ function scheduleStep(step, at) {
   } else if ([2, 6].includes(inBar)) {
     mtone(SCALE[(bar * 3 + inBar) % 7], 0.14, 'triangle', 0.03, at);
   }
+}
+
+// mobile haptics — a distinct rumble grammar per event
+function buzz(pattern) {
+  if (muted || !navigator.vibrate) return;
+  try { navigator.vibrate(pattern); } catch (e) {}
 }
 
 // ---------- game state ----------
@@ -366,6 +377,7 @@ function updateDog(d, dt) {
       d.taunted = false;
       G.dogsLost++;
       sfx.whimper();
+      buzz(200);
       addText(d.x, d.y - 70, 'A DOG LEFT... 💔', '#ff6666', 22);
       shake(6);
       if (G.dogsLost >= 3) gameOver();
@@ -388,6 +400,7 @@ function feedDog(d, isAcorn, fromGround) {
   const hp = headPos(d);
   burst(hp.x, hp.y, 6, '#d2a24c', 2); // crumbs
   sfx.chomp(d.tier);
+  buzz(15);
   shake(2 + d.tier * 1.2);
   if (d.tier === 4) hitstop(0.03);
 
@@ -409,6 +422,7 @@ function tierUp(d) {
   ringBurst(hp.x, hp.y, TIER_COLORS[d.tier]);
   confetti(hp.x, hp.y, 14);
   sfx.bark(d.tier);
+  buzz([30, 40, 60]);
   hitstop(0.06);
   shake(5);
   zoomPunch(hp.x, hp.y, 1.06, 0.3);
@@ -428,6 +442,7 @@ function becomeGuardian(d) {
   G.heat++; G.spikedCount++;
   G.slowT = 0.4;
   sfx.woof();
+  buzz([60, 50, 60, 50, 120]);
   shake(10);
   zoomPunch(d.x, d.y - 40, 1.12, 0.5);
   addText(d.x, d.y - 120, '🛡 GUARDIAN! HEAT +1', '#f1c40f', 26);
@@ -538,6 +553,7 @@ function breakChain(x, y, reason, soft) {
   G.biggestPileLost = Math.max(G.biggestPileLost, G.unbanked);
   if (G.unbanked > 0) {
     sfx.shatter();
+    buzz([90, 60, 90]);
     // coins scatter
     for (let i = 0; i < Math.min(18, 4 + G.unbanked / 200); i++) {
       G.coins.push({ x: pileX(), y: pileY(), vx: rand(-250, 250), vy: rand(-350, -50), t: rand(0.5, 0.9), scatter: true });
@@ -585,6 +601,7 @@ function startFrenzy() {
   bank();
   zoomPunch(pouchPos().x, pouchPos().y - 80, 1.08, 0.35);
   sfx.bell();
+  buzz([20, 30, 20, 30, 20, 30, 80]);
   addText(W / 2, H * 0.45, '🔔 FEEDING FRENZY! TAP TAP TAP!', '#ffd700', 28);
   flash('#ffd70033');
 }
@@ -793,6 +810,7 @@ function spawnBird(force) {
 function koBird(b, byTreat) {
   b.state = 'ko'; b.koT = 1.2;
   sfx.boing(); noise(0.1, 0.1, 1500);
+  buzz(25);
   pow(b.x, b.y, 'POW!', '#e74c3c');
   burst(b.x, b.y, 8, b.magpie ? '#dddddd' : '#7fb3d5', 2.5, 'feather');
   if (b.carrying) { // stolen loot rains back down
@@ -955,6 +973,7 @@ function bonkSquirrel(s, byTreat) {
   }
   s.state = 'ko'; s.koT = 0.8;
   sfx.boing();
+  buzz(25);
   pow(s.x, s.y - 6, 'BONK!', '#e67e22');
   burst(s.x, s.y, 8, '#ffee88', 2.5, 'star');
   // every 8th bonk wakes the Squirrel King
@@ -1344,7 +1363,7 @@ function frame(now) {
   G.texts = G.texts.filter(t => t.t > 0);
   for (const p of G.parts) {
     p.t -= rdt;
-    if (p.kind !== 'ring' && p.kind !== 'pow') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + (p.kind === 'leaf' ? 40 : 500) * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
+    if (p.kind !== 'ring' && p.kind !== 'pow' && p.kind !== 'bark') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + (p.kind === 'leaf' ? 40 : 500) * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
   }
   G.parts = G.parts.filter(p => p.t > 0);
   for (const c of G.coins) {
@@ -1478,6 +1497,13 @@ function update(dt) {
     for (let i = 0; i < 6; i++) sfx.coin(i);
   }
 
+  // last-life warning heartbeat
+  G.warnAcc = (G.warnAcc || 0) - dt;
+  if ((G.dogsLost === 2 || feedables().some(d => d.hunger < 0.15)) && G.warnAcc <= 0) {
+    G.warnAcc = 1.6;
+    tone(90, 0.2, 'sine', 0.05);
+  }
+
   for (const d of [...G.dogs]) updateDog(d, dt);
   for (const t of [...G.treats]) updateTreat(t, dt);
   for (const b of [...G.birds]) updateBird(b, dt);
@@ -1533,6 +1559,14 @@ function draw() {
     vg.addColorStop(1, `rgba(255,180,0,${va})`);
     cx.fillStyle = vg; cx.fillRect(0, 0, W, H);
   }
+  // last-life / starving-dog red pulse
+  if (G.state === 'play' && (G.dogsLost === 2 || feedables().some(d => d.hunger < 0.15))) {
+    const pa = 0.05 + 0.075 * (1 + Math.sin(performance.now() / 420)) / 2;
+    const rv = cx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.4, W / 2, H / 2, Math.max(W, H) * 0.72);
+    rv.addColorStop(0, 'rgba(200,0,0,0)');
+    rv.addColorStop(1, `rgba(200,0,0,${pa.toFixed(3)})`);
+    cx.fillStyle = rv; cx.fillRect(0, 0, W, H);
+  }
   if (G.flashT > 0 && G.flashCol) { cx.fillStyle = G.flashCol; cx.fillRect(-20, -20, W + 40, H + 40); }
 
   // Reckoning letterbox — boss-fight framing for the raid
@@ -1556,11 +1590,19 @@ function draw() {
 }
 
 function drawYard() {
-  // sky → grass gradient
-  const g = cx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#87ceeb'); g.addColorStop(0.18, '#a8d8a8');
-  g.addColorStop(0.55, '#5da95d'); g.addColorStop(1, '#3d7a3d');
-  cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+  // sky → grass gradient; the world reddens as heat climbs
+  const hk = clamp(G.heat / 4, 0, 1);
+  const key = hk.toFixed(2) + '|' + W + '|' + H;
+  if (G.skyKey !== key) {
+    G.skyKey = key;
+    const g = cx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, mixHex('#87ceeb', '#c65b4e', hk));
+    g.addColorStop(0.18, mixHex('#a8d8a8', '#c99a6a', hk * 0.7));
+    g.addColorStop(0.55, shade('#5da95d', 1 - 0.12 * hk));
+    g.addColorStop(1, shade('#3d7a3d', 1 - 0.12 * hk));
+    G.sky = g;
+  }
+  cx.fillStyle = G.sky; cx.fillRect(0, 0, W, H);
   // fence line
   cx.fillStyle = '#8a6d47';
   for (let x = 6; x < W; x += 34) {
@@ -2041,6 +2083,7 @@ function drawParticles() {
 function drawHUD() {
   if (G.state === 'title') return;
   cx.save();
+  cx.textAlign = 'left'; // particles/aim-arc leak 'center' — reset defensively
   // score — rolls up with a punch while counting
   const scoreDiff = G.score - G.dispScore;
   const spin = scoreDiff > 2;
