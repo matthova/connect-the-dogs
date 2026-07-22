@@ -149,6 +149,7 @@ function resetGame() {
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
   G.pileJit = 0; G.flashT = 0; G.flashCol = null;
+  G.pouchKick = 0;
   G.closeCallCd = 0;
   G.gameOverT = 0; G.graduates = [];
   // starting roster: near + both mid slots (far row unlocks as you play)
@@ -427,6 +428,12 @@ function launchTreat(x, y, vx, vy, isAcorn) {
     trail: [],
   });
   if (sp > 900) sfx.whistle();
+  // launch weight: pouch recoil, dust ring, thump scaled by power
+  if (y > H * 0.8) {
+    G.pouchKick = 1;
+    ringBurst(x, y + 10, '#c9b458');
+    tone(140, 0.08, 'sine', 0.05 + 0.1 * (sp / maxLaunch()), 60);
+  }
 }
 function airborneTreats() { return G.treats.filter(t => t.state === 'air'); }
 
@@ -476,6 +483,7 @@ function updateTreat(t, dt) {
     // landing
     if (t.vy > 0 && t.y >= t.groundY) {
       t.state = 'ground'; t.groundT = GROUND_TTL; t.y = t.groundY;
+      burst(t.x, t.y, 5, '#4a8c4a', 1.6);
       burst(t.x, t.y, 3, '#c9b458', 1.5);
     }
   } else if (t.state === 'ground') {
@@ -914,6 +922,7 @@ function frame(now) {
   G.shake = Math.max(0, G.shake - rdt * 26);
   if (G.flashT > 0) G.flashT -= rdt;
   if (G.pileJit > 0) G.pileJit -= rdt * 2;
+  if (G.pouchKick > 0) G.pouchKick -= rdt * 3;
   if (G.closeCallCd > 0) G.closeCallCd -= rdt;
   for (const t of G.texts) t.t -= rdt;
   G.texts = G.texts.filter(t => t.t > 0);
@@ -1211,7 +1220,16 @@ function drawTreat(t) {
       cx.beginPath(); cx.arc(t.x, t.y, 14 + ping * 30, 0, TAU); cx.stroke();
     }
   }
-  cx.translate(t.x, t.y); cx.rotate(t.rot);
+  cx.translate(t.x, t.y);
+  const spd = Math.hypot(t.vx || 0, t.vy || 0);
+  if (t.state === 'air' && spd > 700) {
+    // stretch along the flight path — fast throws look fast
+    cx.rotate(Math.atan2(t.vy, t.vx));
+    const st = clamp(spd / 2200, 0, 0.35);
+    cx.scale(1 + st, 1 - st * 0.6);
+  } else {
+    cx.rotate(t.rot);
+  }
   cx.font = t.isAcorn ? '26px sans-serif' : '22px sans-serif';
   cx.textAlign = 'center'; cx.textBaseline = 'middle';
   if (t.isAcorn) {
@@ -1335,15 +1353,17 @@ function drawPouch() {
   cx.fillRect(0, H * 0.8, W, H * 0.2);
   cx.strokeStyle = 'rgba(255,255,255,0.15)'; cx.setLineDash([6, 10]);
   cx.beginPath(); cx.moveTo(0, H * 0.8); cx.lineTo(W, H * 0.8); cx.stroke(); cx.setLineDash([]);
-  // pouch
+  // pouch (recoils on launch)
   const jig = G.frenzyT > 0 ? Math.sin(performance.now() / 50) * 3 : 0;
+  const kick = 8 * Math.sin(Math.PI * clamp(G.pouchKick, 0, 1));
+  const ksq = 1 - 0.15 * Math.sin(Math.PI * clamp(G.pouchKick, 0, 1));
   cx.fillStyle = '#8B4513';
-  cx.beginPath(); cx.ellipse(p.x + jig, p.y, 46, 26, 0, 0, TAU); cx.fill();
+  cx.beginPath(); cx.ellipse(p.x + jig, p.y + kick, 46, 26 * ksq, 0, 0, TAU); cx.fill();
   cx.fillStyle = '#A0522D';
-  cx.beginPath(); cx.ellipse(p.x + jig, p.y - 10, 40, 14, 0, 0, TAU); cx.fill();
+  cx.beginPath(); cx.ellipse(p.x + jig, p.y - 10 + kick, 40, 14 * ksq, 0, 0, TAU); cx.fill();
   cx.font = '24px sans-serif'; cx.textAlign = 'center';
-  cx.fillText('🦴', p.x + jig - 12, p.y - 6);
-  cx.fillText('🦴', p.x + jig + 10, p.y - 2);
+  cx.fillText('🦴', p.x + jig - 12, p.y - 6 + kick);
+  cx.fillText('🦴', p.x + jig + 10, p.y - 2 + kick);;
   if (G.state === 'play' && (G.t < 8 || (!G.fedOnce && G.t < 25)) && !G.aim) {
     cx.fillStyle = 'rgba(255,255,255,0.9)'; cx.font = 'bold 15px sans-serif';
     cx.fillText('⬆ DRAG UP FROM HERE TO FLICK TREATS', p.x, p.y - 46);
