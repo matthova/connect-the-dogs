@@ -189,6 +189,7 @@ function resetGame() {
   G.birdTimer = 12; G.sqTimer = 10;
   G.wind = 0; G.windT = 0; G.windDir = 1; G.windTimer = 40; G.leafAcc = 0;
   G.shroom = null; G.shroomTimer = 45;
+  G.bonkCount = 0;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
@@ -854,6 +855,33 @@ function spawnSquirrel(force) {
 }
 function bonkSquirrel(s, byTreat) {
   if (s.staggerT > 0) return;
+  // the King shrugs off taps — only treats hurt him
+  if (s.king) {
+    if (!byTreat) {
+      s.staggerT = 0.25;
+      sfx.thud();
+      addText(s.x, s.y - 44, 'TOO BIG! BEAN HIM! 🦴', '#ffaa44', 16);
+      return;
+    }
+    s.hp--; s.staggerT = 0.45; s.retreatT = 2; s.drainAcc = 1.5;
+    pow(s.x, s.y - 14, 'THUNK!', '#ffaa44');
+    burst(s.x, s.y, 8, '#ffee88', 2.5, 'star');
+    shake(4);
+    if (s.hp <= 0) {
+      s.state = 'ko'; s.koT = 1;
+      pow(s.x, s.y - 20, 'DETHRONED!', '#ffd700');
+      confetti(s.x, s.y - 20, 24);
+      const pts = 500 * CHAIN_STEPS[G.chainStep];
+      if (G.frenzyT > 0) G.score += pts; else G.unbanked += pts;
+      addText(s.x, s.y - 60, '+' + fmt(pts), '#ffd700', 22);
+      // royal loot: a golden acorn and two treats
+      G.treats.push({ x: s.x, y: s.y + 8, vx: 0, vy: 0, rot: 0, vrot: 0, state: 'ground', isAcorn: true, groundT: 12, groundY: s.y + 8, trail: [], scentT: 2 });
+      for (const off of [-34, 34]) G.treats.push({ x: s.x + off, y: s.y + 12, vx: 0, vy: 0, rot: 0, vrot: 0, state: 'ground', isAcorn: false, groundT: GROUND_TTL + 3, groundY: s.y + 12, trail: [] });
+      sfx.woof(); sfx.bell();
+      hitstop(0.06);
+    }
+    return;
+  }
   if (s.hp > 1) {
     s.hp--; s.staggerT = 0.5;
     sfx.thud();
@@ -877,12 +905,60 @@ function bonkSquirrel(s, byTreat) {
   sfx.boing();
   pow(s.x, s.y - 6, 'BONK!', '#e67e22');
   burst(s.x, s.y, 8, '#ffee88', 2.5, 'star');
+  // every 8th bonk wakes the Squirrel King
+  G.bonkCount++;
+  if (G.bonkCount % 8 === 0 && G.t > 40 && !G.squirrels.some(q => q.king && q.state !== 'ko')) {
+    setTimeout2(1.5, () => { if (G.state === 'play') spawnKing(); });
+  }
   shake(3);
   if (byTreat) {
     chainUp();
     const pts = 50 * CHAIN_STEPS[G.chainStep];
     if (G.frenzyT > 0) G.score += pts; else G.unbanked += pts;
     addText(s.x, s.y - 40, '+' + fmt(pts) + ' BONKED!', '#ffd700', 17);
+  }
+}
+function spawnKing() {
+  const fromLeft = Math.random() < 0.5;
+  G.squirrels.push({
+    x: fromLeft ? -50 : W + 50, y: H * 0.6,
+    state: 'seek', target: null, targetDog: null,
+    carrying: null, speed: 80, fat: false, king: true,
+    hp: 4, koT: 0, bobT: 0, staggerT: 0, retreatT: 0, drainAcc: 1.5,
+  });
+  addText(W / 2, H * 0.3, '👑 THE SQUIRREL KING APPROACHES!', '#ffaa44', 24);
+  sfx.screech(); sfx.thud();
+  shake(6);
+}
+function updateKing(s, dt) {
+  if (s.retreatT > 0) { s.retreatT -= dt; return; }
+  const cands = feedables();
+  if (!cands.length) {
+    s.x += (s.x < W / 2 ? -1 : 1) * 90 * dt;
+    if (s.x < -70 || s.x > W + 70) G.squirrels.splice(G.squirrels.indexOf(s), 1);
+    return;
+  }
+  const d = cands.reduce((a, c) => c.tier > a.tier ? c : a);
+  const tx = d.x + 52, ty = d.y + 8;
+  const dd = dist(s.x, s.y, tx, ty);
+  if (dd > 10) {
+    s.x += (tx - s.x) / dd * s.speed * dt;
+    s.y += (ty - s.y) / dd * s.speed * dt;
+  } else {
+    // latched: gnaws 1 treat of progress every 1.5s
+    s.drainAcc -= dt;
+    if (s.drainAcc <= 0) {
+      s.drainAcc = 1.5;
+      if (d.treats > 0) {
+        d.treats--;
+        const nt = dogTier(d.treats);
+        if (nt < d.tier) { d.tier = nt; addText(d.x, d.y - 90, 'COLLAR LOST!', '#e74c3c', 20); }
+        d.targetScale = growthScale(d.treats);
+        addText(s.x, s.y - 44, '−1 🦴', '#ff8866', 16);
+        tone(200, 0.12, 'sawtooth', 0.1, 90);
+        burst(d.x, d.y - 20, 4, '#88aaff', 2);
+      }
+    }
   }
 }
 function updateSquirrel(s, dt) {
@@ -894,6 +970,7 @@ function updateSquirrel(s, dt) {
     if (s.koT <= 0 || s.x < -60 || s.x > W + 60) G.squirrels.splice(G.squirrels.indexOf(s), 1);
     return;
   }
+  if (s.king) { updateKing(s, dt); return; }
   // aura avoidance (fat squirrels barge straight through)
   if (G.shroom && dist(s.x, s.y, G.shroom.x, G.shroom.y) < 26) {
     G.shroom.sq = 1;
@@ -1678,9 +1755,9 @@ function drawSquirrel(s) {
   if (s.state === 'ko') cx.scale(1, 0.3);
   if (s.state === 'taunt') { cx.rotate(Math.sin(s.bobT) * 0.25); cx.translate(0, -Math.abs(Math.sin(s.bobT)) * 6); }
   if (s.staggerT > 0) cx.rotate(Math.sin(s.staggerT * 40) * 0.15);
-  const sc = s.fat ? 1.45 : 1;
+  const sc = s.king ? 2.3 : s.fat ? 1.45 : 1;
   cx.scale(sc, sc);
-  const bodyC = s.fat ? '#6d4423' : '#a0622d';
+  const bodyC = s.king ? '#7a4a1e' : s.fat ? '#6d4423' : '#a0622d';
   // tail
   cx.strokeStyle = bodyC; cx.lineWidth = 8; cx.lineCap = 'round';
   cx.beginPath(); cx.moveTo(-8, 2 + bob * 0.4);
@@ -1702,6 +1779,12 @@ function drawSquirrel(s) {
     cx.fillText(s.carrying.isAcorn ? '🌰' : '🦴', 12, -12);
   }
   if (s.fat) { cx.fillStyle = '#fff'; cx.font = 'bold 9px sans-serif'; cx.textAlign = 'center'; cx.fillText(s.hp > 1 ? '••' : '•', 0, 5); }
+  if (s.king) {
+    cx.font = '14px sans-serif'; cx.textAlign = 'center';
+    cx.fillText('👑', 8, -14 + bob * 0.3);
+    cx.fillStyle = '#ff5555';
+    for (let i = 0; i < s.hp; i++) { cx.beginPath(); cx.arc(-9 + i * 6, 12, 2.2, 0, TAU); cx.fill(); }
+  }
   if (s.state === 'taunt') { cx.font = '12px sans-serif'; cx.fillText('😝', 8, -16); }
   cx.restore();
 }
