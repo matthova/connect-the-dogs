@@ -187,6 +187,7 @@ function resetGame() {
   G.frenzyT = 0; G.frenzyCd = 0; G.dreadT = 0; G.fBeat = 0; G.frenzyTaps = 0;
   G.timers = [];
   G.birdTimer = 12; G.sqTimer = 10;
+  G.wind = 0; G.windT = 0; G.windDir = 1; G.windTimer = 40; G.leafAcc = 0;
   G.dogs = []; G.treats = []; G.birds = []; G.squirrels = [];
   G.parts = []; G.texts = []; G.coins = [];
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
@@ -495,6 +496,7 @@ function airborneTreats() { return G.treats.filter(t => t.state === 'air'); }
 function updateTreat(t, dt) {
   if (t.state === 'air') {
     t.vy += GRAV * dt;
+    t.vx += G.wind * dt;
     t.x += t.vx * dt; t.y += t.vy * dt;
     t.rot += t.vrot * dt;
     t.trail.push({ x: t.x, y: t.y, a: 1 });
@@ -676,7 +678,7 @@ function updateBird(b, dt) {
     return;
   }
   if (b.state === 'cruise') {
-    b.x += b.dir * b.speed * dt;
+    b.x += b.dir * b.speed * dt + G.wind * 0.3 * dt;
     b.phase += dt * 1.6;
     b.y = b.baseY + Math.sin(b.phase) * 34;
     // bounce off guardian auras
@@ -1067,7 +1069,7 @@ function frame(now) {
   G.texts = G.texts.filter(t => t.t > 0);
   for (const p of G.parts) {
     p.t -= rdt;
-    if (p.kind !== 'ring' && p.kind !== 'pow') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + 500 * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
+    if (p.kind !== 'ring' && p.kind !== 'pow') { p.x += (p.vx || 0) * rdt; p.y += (p.vy || 0) * rdt; p.vy = (p.vy || 0) + (p.kind === 'leaf' ? 40 : 500) * rdt; p.rot = (p.rot || 0) + (p.vr || 0) * rdt; }
   }
   G.parts = G.parts.filter(p => p.t > 0);
   for (const c of G.coins) {
@@ -1107,6 +1109,32 @@ function update(dt) {
     if (G.frenzyT <= 0) endFrenzy();
   }
   if (G.dreadT > 0) G.dreadT -= dt;
+
+  // gust fronts: telegraph 2s, ramp 1s, hold 7s, ramp out 1s
+  G.windTimer -= dt;
+  if (G.windTimer <= 0 && G.windT <= 0 && G.t > 25) {
+    G.windT = 11;
+    G.windDir = Math.random() < 0.5 ? -1 : 1;
+    G.windTimer = rand(35, 55);
+    addText(W / 2, H * 0.22, G.windDir > 0 ? 'WIND PICKING UP →' : '← WIND PICKING UP', '#d8ffd8', 20);
+    noise(0.5, 0.05, 400);
+  }
+  if (G.windT > 0) {
+    G.windT -= dt;
+    const wt = G.windT;
+    const k = wt > 9 ? 0 : wt > 8 ? 9 - wt : wt > 1 ? 1 : Math.max(0, wt);
+    G.wind = G.windDir * 260 * k;
+    G.leafAcc -= dt;
+    if (G.leafAcc <= 0) {
+      G.leafAcc = 0.09;
+      G.parts.push({
+        x: G.windDir > 0 ? -10 : W + 10, y: rand(H * 0.15, H * 0.8),
+        vx: G.windDir * rand(240, 380), vy: rand(-30, 50),
+        t: 1.4, max: 1.4, color: pick(['#7cb342', '#8d6e63', '#aed581']),
+        size: rand(3, 5), kind: 'leaf', rot: rand(0, TAU), vr: rand(-8, 8),
+      });
+    }
+  } else G.wind = 0;
 
   // spawns
   G.birdTimer -= dt;
@@ -1527,6 +1555,7 @@ function drawAimArc() {
   let dots = 0;
   for (let i = 1; i <= 84 && dots < 12; i++) {
     simVy += GRAV * step;
+    simVx += G.wind * step;
     x += simVx * step; y += simVy * step;
     if (i % 7 === 0) {
       cx.globalAlpha = 0.8 - dots * 0.055;
@@ -1597,7 +1626,7 @@ function drawParticles() {
       cx.fillStyle = p.color; cx.fillText(p.word, 0, 1);
       cx.restore();
       cx.textBaseline = 'alphabetic';
-    } else if (p.kind === 'confetti') {
+    } else if (p.kind === 'confetti' || p.kind === 'leaf') {
       cx.save(); cx.translate(p.x, p.y); cx.rotate(p.rot);
       cx.fillStyle = p.color; cx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
       cx.restore();
