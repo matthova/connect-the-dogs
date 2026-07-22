@@ -192,6 +192,7 @@ function resetGame() {
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
   G.pileJit = 0; G.flashT = 0; G.flashCol = null;
   G.pouchKick = 0;
+  G.zoomT = 0; G.zoomDur = 0.3; G.zoomAmt = 1; G.zoomX = 0; G.zoomY = 0;
   G.dispScore = 0; G.dispUnbanked = 0; G.tickCd = 0; G.beatAcc = 0;
   G.closeCallCd = 0; G.runCloseCalls = 0; G.snapStreak = 0;
   G.gameOverT = 0; G.graduates = [];
@@ -350,6 +351,7 @@ function tierUp(d) {
   sfx.bark(d.tier);
   hitstop(0.06);
   shake(5);
+  zoomPunch(hp.x, hp.y, 1.06, 0.3);
   bank();
   addText(d.x, d.y - 100, TIER_NAMES[d.tier] + ' COLLAR!', TIER_COLORS[d.tier], 22);
   if (d.tier >= 5) becomeGuardian(d);
@@ -361,6 +363,7 @@ function becomeGuardian(d) {
   G.slowT = 0.4;
   sfx.woof();
   shake(10);
+  zoomPunch(d.x, d.y - 40, 1.12, 0.5);
   addText(d.x, d.y - 120, '🛡 GUARDIAN! HEAT +1', '#f1c40f', 26);
   flash('#f1c40f22');
   // replacement pup trots in after 2s — or, if the yard is full of guardians,
@@ -454,6 +457,7 @@ function startFrenzy() {
   G.frenzyT = 5;
   G.fBeat = 0; G.frenzyTaps = 0;
   bank();
+  zoomPunch(pouchPos().x, pouchPos().y - 80, 1.08, 0.35);
   sfx.bell();
   addText(W / 2, H * 0.45, '🔔 FEEDING FRENZY! TAP TAP TAP!', '#ffd700', 28);
   flash('#ffd70033');
@@ -900,6 +904,9 @@ function pow(x, y, word, color, small) {
 function shake(m) { G.shake = Math.max(G.shake, m); }
 function hitstop(s) { G.hitstop = Math.max(G.hitstop, s); }
 function flash(col) { G.flashT = 0.3; G.flashCol = col; }
+function zoomPunch(x, y, amt, dur) {
+  G.zoomX = x; G.zoomY = y; G.zoomAmt = amt || 1.08; G.zoomDur = dur || 0.25; G.zoomT = G.zoomDur;
+}
 
 // ---------- input ----------
 function pouchPos() { return { x: W / 2, y: H * 0.93 }; }
@@ -1051,6 +1058,7 @@ function frame(now) {
 
   // visuals tick on real time
   G.shake = Math.max(0, G.shake - rdt * 26);
+  if (G.zoomT > 0) G.zoomT -= rdt;
   if (G.flashT > 0) G.flashT -= rdt;
   if (G.pileJit > 0) G.pileJit -= rdt * 2;
   if (G.pouchKick > 0) G.pouchKick -= rdt * 3;
@@ -1135,6 +1143,11 @@ function update(dt) {
 function draw() {
   cx.save();
   if (G.shake > 0) cx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake));
+  if (G.zoomT > 0) {
+    const k = Math.sin(Math.PI * (1 - G.zoomT / G.zoomDur));
+    const z = 1 + (G.zoomAmt - 1) * k;
+    cx.translate(G.zoomX, G.zoomY); cx.scale(z, z); cx.translate(-G.zoomX, -G.zoomY);
+  }
 
   drawYard();
 
@@ -1175,6 +1188,21 @@ function draw() {
     cx.fillStyle = vg; cx.fillRect(0, 0, W, H);
   }
   if (G.flashT > 0 && G.flashCol) { cx.fillStyle = G.flashCol; cx.fillRect(-20, -20, W + 40, H + 40); }
+
+  // Reckoning letterbox — boss-fight framing for the raid
+  if (G.dreadT > 0 && G.state === 'play') {
+    const k = Math.min(clamp((4 - G.dreadT) / 0.4, 0, 1), clamp(G.dreadT / 0.4, 0, 1));
+    const bh = H * 0.09 * k;
+    cx.fillStyle = `rgba(40,0,0,${(0.12 * k).toFixed(3)})`;
+    cx.fillRect(0, 0, W, H);
+    cx.fillStyle = '#000';
+    cx.fillRect(0, -2, W, bh + 2);
+    cx.fillRect(0, H - bh, W, bh + 2);
+    if (k > 0.8) {
+      cx.fillStyle = '#ff4444'; cx.font = 'bold 20px sans-serif'; cx.textAlign = 'center';
+      cx.fillText('T H E   R E C K O N I N G', W / 2, bh - 14);
+    }
+  }
 
   if (G.state === 'title') drawTitle();
   if (G.state === 'over') drawGameOver();
