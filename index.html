@@ -150,7 +150,7 @@ function resetGame() {
   G.aim = null;                // {sx,sy,mx,my,pid, acorn?}
   G.pileJit = 0; G.flashT = 0; G.flashCol = null;
   G.pouchKick = 0;
-  G.dispScore = 0; G.dispUnbanked = 0; G.tickCd = 0;
+  G.dispScore = 0; G.dispUnbanked = 0; G.tickCd = 0; G.beatAcc = 0;
   G.closeCallCd = 0; G.runCloseCalls = 0; G.snapStreak = 0;
   G.gameOverT = 0; G.graduates = [];
   // starting roster: near + both mid slots (far row unlocks as you play)
@@ -393,6 +393,10 @@ function bank() {
   if (G.unbanked <= 0) return;
   const amt = G.unbanked;
   G.score += amt; G.unbanked = 0;
+  // relief resolve — exhale after the heartbeat
+  tone(523, 0.15, 'sine', 0.1);
+  tone(392, 0.35, 'sine', 0.08, null, 0.13);
+  tone(261, 0.5, 'sine', 0.05, null, 0.13);
   const n = clamp(Math.round(amt / 150), 6, 20);
   for (let i = 0; i < n; i++) {
     G.coins.push({ x: pileX() + rand(-14, 14), y: pileY() + rand(-10, 10), vx: 0, vy: 0, t: 0.55 + i * 0.03, toScore: true });
@@ -1051,6 +1055,17 @@ function update(dt) {
     G.sqTimer = Math.max(4, 9 - 0.6 * G.heat) * rand(0.85, 1.15);
   }
 
+  // greed heartbeat — the bigger the unbanked pile, the faster your pulse
+  if (G.unbanked > 0 && G.frenzyT <= 0) {
+    G.beatAcc -= dt;
+    if (G.beatAcc <= 0) {
+      G.beatAcc = clamp(1.6 - G.unbanked / 2500, 0.45, 1.6);
+      tone(65, 0.09, 'sine', 0.09);
+      tone(55, 0.09, 'sine', 0.07, null, 0.12);
+      if (G.unbanked > 2000) tone(clamp(300 + G.unbanked / 20, 300, 900), 0.3, 'sine', 0.022);
+    }
+  } else G.beatAcc = 0;
+
   for (const d of [...G.dogs]) updateDog(d, dt);
   for (const t of [...G.treats]) updateTreat(t, dt);
   for (const b of [...G.birds]) updateBird(b, dt);
@@ -1088,6 +1103,14 @@ function draw() {
   drawHUD();
 
   if (G.frenzyT > 0) { cx.fillStyle = 'rgba(255,215,0,0.10)'; cx.fillRect(-20, -20, W + 40, H + 40); }
+  // greed vignette — gold pressure closes in with the pile
+  if (G.state === 'play' && G.unbanked > 800) {
+    const va = clamp(G.unbanked / 6000, 0, 0.18);
+    const vg = cx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.75);
+    vg.addColorStop(0, 'rgba(255,200,0,0)');
+    vg.addColorStop(1, `rgba(255,180,0,${va})`);
+    cx.fillStyle = vg; cx.fillRect(0, 0, W, H);
+  }
   if (G.flashT > 0 && G.flashCol) { cx.fillStyle = G.flashCol; cx.fillRect(-20, -20, W + 40, H + 40); }
 
   if (G.state === 'title') drawTitle();
