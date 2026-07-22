@@ -215,6 +215,7 @@ function spawnDog(slotIdx, walkIn) {
     hunger: 1,
     mouthOpen: true, mouthT: rand(0.2, 0.8),
     taunted: false, freeOpenT: 0, openedAt: -9,
+    fetchCd: 0, fetching: null,
     guardian: false, auraA: 0,
     blinkT: rand(1, 4), hopT: 0, wagPhase: rand(0, TAU),
     walkIn: walkIn ? 1 : 0, leaving: false, leaveX: 0,
@@ -270,6 +271,43 @@ function updateDog(d, dt) {
   d.x = d.fx * W; d.y = d.fy * H;
 
   if (d.guardian) { d.auraA = Math.min(1, d.auraA + dt * 2); return; }
+
+  // fetch: chase a grounded treat, gobble it, trot home
+  if (d.fetchCd > 0) d.fetchCd -= dt;
+  if (d.fetching) {
+    const ft = d.fetching;
+    if (G.treats.indexOf(ft) < 0 || ft.state !== 'ground') {
+      if (d.fetching) { sfx.whimper(); addText(d.x, d.y - 60, 'aww...', '#ccddcc', 13); }
+      d.fetching = null;
+    } else {
+      const dd = dist(d.x, d.y, ft.x, ft.y - 10);
+      const sp2 = 300 * dt;
+      if (dd > sp2) {
+        d.fetchX = (d.fetchX || d.x) + (ft.x - d.x) / dd * sp2;
+        d.fetchY = (d.fetchY || d.y) + (ft.y - 10 - d.y) / dd * sp2;
+      } else {
+        removeTreat(ft);
+        feedDog(d, ft.isAcorn);
+        addText(d.x, d.y - 70, 'FETCHED!', '#aaffaa', 16);
+        d.fetching = null;
+      }
+    }
+  }
+  if (d.fetching) {
+    d.x = d.fetchX; d.y = d.fetchY;
+  } else if (d.fetchX !== undefined) {
+    // trot home
+    const hx0 = d.fx * W, hy0 = d.fy * H;
+    const dd = dist(d.fetchX, d.fetchY, hx0, hy0);
+    if (dd > 6) {
+      const sp2 = 260 * dt;
+      d.fetchX += (hx0 - d.fetchX) / dd * Math.min(dd, sp2);
+      d.fetchY += (hy0 - d.fetchY) / dd * Math.min(dd, sp2);
+      d.x = d.fetchX; d.y = d.fetchY;
+    } else {
+      d.fetchX = undefined; d.fetchY = undefined;
+    }
+  }
 
   // mouth cycle (locked shut while taunted; locked open in frenzy / free window)
   const cyc = mouthCycle(d);
@@ -968,6 +1006,19 @@ cv.addEventListener('pointerdown', e => {
   const acorn = G.treats.find(t => t.state === 'ground' && t.isAcorn && dist(x, y, t.x, t.y) < 44);
   if (acorn) { acorn.held = true; G.aim = { sx: acorn.x, sy: acorn.y, mx: x, my: y, acorn, pid: e.pointerId }; return; }
 
+  // tap a dog to send it fetching a grounded treat
+  const fd = feedables().find(dd => !dd.taunted && dd.fetchCd <= 0 && !dd.fetching && dist(x, y, dd.x, dd.y - 20) < 58);
+  if (fd) {
+    const nearby = G.treats.filter(t2 => t2.state === 'ground' && !t2.held && dist(fd.x, fd.y, t2.x, t2.y) < 280);
+    if (nearby.length) {
+      fd.fetching = nearby.reduce((a, c) => dist(fd.x, fd.y, c.x, c.y) < dist(fd.x, fd.y, a.x, a.y) ? c : a);
+      fd.fetchCd = 6;
+      sfx.bark(fd.tier);
+      addText(fd.x, fd.y - 70, 'FETCH! 🐾', '#ffffff', 16);
+      return;
+    }
+  }
+
   if (inPouchZone(x, y)) {
     if (airCount() >= MAX_AIRBORNE) {
       addText(W / 2, H * 0.85, 'POUCH BUSY — ' + MAX_AIRBORNE + ' IN THE AIR!', '#ffffff', 15);
@@ -1470,6 +1521,13 @@ function drawDog(d) {
       cx.fillStyle = 'rgba(0,0,0,0.3)'; cx.fillRect(bx - 1, by + 9, bw + 2, 5);
       cx.fillStyle = TIER_COLORS[Math.min(5, d.tier + 1)];
       cx.fillRect(bx, by + 10, bw * clamp(p, 0, 1), 3);
+    }
+    // fetch cooldown pip
+    if (d.fetchCd > 0) {
+      cx.strokeStyle = 'rgba(255,255,255,0.35)'; cx.lineWidth = 2.5;
+      cx.beginPath(); cx.arc(bx + bw + 11, by + 3, 5, 0, TAU); cx.stroke();
+      cx.strokeStyle = '#fff';
+      cx.beginPath(); cx.arc(bx + bw + 11, by + 3, 5, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - d.fetchCd / 6)); cx.stroke();
     }
   }
   cx.restore();
